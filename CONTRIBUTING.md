@@ -4,24 +4,29 @@ Thanks for your interest in contributing! This guide will help you get started.
 
 ## Development Setup
 
-1. **Prerequisites**: macOS with Apple Mail configured, Python 3.11+, [uv](https://docs.astral.sh/uv/)
+1. **Prerequisites**: macOS with Apple Mail configured, Python 3.11+, [uv](https://docs.astral.sh/uv/), [just](https://just.systems) (`brew install just`)
 
-2. **Clone and install**:
+2. **Clone and install** (deps + git hooks):
    ```bash
    git clone https://github.com/imdinu/apple-mail-mcp.git
    cd apple-mail-mcp
-   uv sync
+   just setup
    ```
 
-3. **Build the search index** (requires Full Disk Access for your terminal):
+3. **Run the checks** — this is exactly what CI runs, in ~5s:
    ```bash
-   uv run apple-mail-mcp index
+   just check
    ```
 
-4. **Run tests**:
+4. **Optional — build the index and smoke-test against your real Mail.app**
+   (requires Full Disk Access for your terminal):
    ```bash
-   uv run pytest
+   just index
+   just smoke
    ```
+
+`just` (no args) lists every recipe. Each one is a one-line wrapper
+over `uv run …`, so the raw commands stay visible in the `justfile`.
 
 ## Project Structure
 
@@ -49,22 +54,42 @@ src/apple_mail_mcp/
 
 ### Code Style
 
-- **Formatter**: `uv run ruff format src/`
-- **Linter**: `uv run ruff check src/`
+- `just fmt` formats and auto-fixes; `just lint` checks (ruff, `src/` + `tests/`)
 - Line length: 80 characters
 - Type hints required (Python 3.11+ syntax)
 
+The `pre-commit` hook installed by `just setup` runs ruff on the staged
+files only (<1s); `pre-push` runs `just check`. Bypass once with
+`--no-verify`; remove with `just unhook`.
+
 ### Testing
 
-All changes should include tests. Run the full suite before submitting:
+All changes should include tests.
 
 ```bash
-uv run ruff check src/          # Lint
-uv run ruff format --check src/ # Format check
-uv run pytest -v                # Tests
+just test tests/test_server.py -k "read_only"   # inner loop, <1s
+just tf                                         # rerun last failures
+just check                                      # lint + format + full suite (= CI)
 ```
 
-Tests use `pytest` with `pytest-asyncio`. Most tests mock JXA execution so they run without Apple Mail.
+Tests use `pytest` with `pytest-asyncio`. The suite mocks JXA and stubs
+the real `~/Library/Mail`, so it runs in ~3s without Apple Mail. A test
+that needs `find_mail_directory()` for real (against a sandboxed
+`Path.home`) opts in with `@pytest.mark.real_mail_dir`.
+
+`tests/test_release_metadata.py` fails when `pyproject.toml` /
+`server.json` versions diverge, when `CHANGELOG.md` lacks a section for
+the current version, or when the tool roster in `server.py` no longer
+matches the counts and tables in README / CLAUDE.md / docs. Its
+message names the files to fix.
+
+### Adding a write tool
+
+Mutating tools (mark read, flag, move, send, …) follow the contract in
+`.claude/skills/write-tool/SKILL.md`: `_ensure_writable()` first
+(enforced by an AST test), hidden-account gate, `json.dumps()` for
+every string entering JXA, bounded batches, new state in the return
+value, plus a CLI command, tests, docs rows, and a CHANGELOG entry.
 
 ### Architecture Notes
 
@@ -75,7 +100,7 @@ Tests use `pytest` with `pytest-asyncio`. Most tests mock JXA execution so they 
 
 ## Submitting a PR
 
-1. Ensure all checks pass (`ruff check`, `ruff format`, `pytest`)
+1. Ensure `just check` passes (same commands as CI)
 2. Write a clear PR description explaining *what* and *why*
 3. Keep the diff focused — avoid unrelated changes in the same PR
 4. PRs are typically squash-merged into `main`

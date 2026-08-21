@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Developer workflow overhaul** — `justfile` task runner (`just check` is the local mirror of CI), targeted `just test-changed`, opt-in git hooks (`just hooks`: staged-file ruff on commit, changed-file tests on push), `scripts/release.sh` collapsing the 4-step release checklist, `scripts/smoke.sh` for real-Mail.app verification, Claude Code project settings + skills (`.claude/`) and an `AGENTS.md` mirror for Codex. Test suite wall time drops from ~280s to ~3s: nine `test_manager.py` tests were walking the developer's real `~/Library/Mail`; a conftest guard now keeps the whole suite off it. `tests/` is in the ruff lint scope. New `tests/test_release_metadata.py` fails the build when `pyproject.toml`/`server.json` versions diverge, when the `CHANGELOG.md` lacks a section for the current version, or when the tool roster in `server.py` drifts from the counts and tables in README/CLAUDE.md/docs.
+
+## [0.4.3] - 2026-07-30
+
+### Fixed
+
+- **Single index writer across concurrent server instances (#106)** — Claude Desktop spawns every MCP server twice, so two processes ran disk reconciliation and a file watcher against the same `index.db` and reverted each other's writes in a ping-pong loop. `serve` now try-acquires an advisory `flock` (`IndexLock`, `index/lock.py`) on `index.db.lock` before its background sync; the loser runs index-passive (`IndexManager.index_writer = False` gates all index writes) and retries every `APPLE_MAIL_LOCK_RETRY_SECONDS` (default 180, `[server] lock_retry_seconds`), promoting to writer when the holder exits. CLI `index`/`rebuild` block up to 30s for the same lock, then fail with instructions. The lock is per-database and orthogonal to `read_only`, which gates JXA mail mutations. (#108)
+
 ## [0.4.2] - 2026-07-02
 
 ### Added

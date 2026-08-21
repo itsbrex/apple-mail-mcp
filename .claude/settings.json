@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(just:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run --frozen pytest:*)",
+      "Bash(uv run --frozen ruff:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv lock:*)",
+      "Bash(uvx ty:*)",
+      "Bash(uv run apple-mail-mcp accounts:*)",
+      "Bash(uv run apple-mail-mcp mailboxes:*)",
+      "Bash(uv run apple-mail-mcp status:*)",
+      "Bash(uv run apple-mail-mcp emails:*)",
+      "Bash(uv run apple-mail-mcp search:*)",
+      "Bash(uv run apple-mail-mcp read:*)",
+      "Bash(scripts/smoke.sh:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git show:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ruff-on-edit.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

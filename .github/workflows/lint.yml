@@ -6,24 +6,34 @@ on:
   pull_request:
     branches: [main]
 
+# A new push to the same branch/PR supersedes the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 # Opt into Node 24 ahead of the June 2026 forced cutover. Quiets the
 # deprecation warning that surfaces on every Actions run today and keeps
 # us compatible after Node 20 is removed from runners (Sept 2026).
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Local mirror: `just check` runs the same three commands in the same
+# order. Keep them in sync — green locally must mean green here.
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --group dev
-      - run: uv run ruff check src/
-      - run: uv run ruff format --check src/
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --group dev
+      - run: uv run --frozen ruff check src/ tests/
+      - run: uv run --frozen ruff format --check src/ tests/
 
-  # macOS runner: the project is macOS-only, and most of the suite runs
-  # without Mail.app present (parsing, search, config, builders).
+  # macOS runner: the project is macOS-only, and the whole suite runs
+  # without Mail.app present (JXA is mocked; the real ~/Library/Mail is
+  # stubbed out by tests/conftest.py).
   test:
     runs-on: macos-latest
     strategy:
@@ -35,5 +45,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --group dev
-      - run: uv run pytest -q
+          enable-cache: true
+      - run: uv sync --frozen --group dev
+      # --durations surfaces any test that starts walking real disk
+      # again (the suite is ~3s; one slow test stands out immediately).
+      - run: uv run --frozen pytest -q --durations=5 --durations-min=1.0

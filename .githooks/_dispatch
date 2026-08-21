@@ -1,0 +1,56 @@
+#!/bin/sh
+# Single entry point for every hook in this directory. Each named hook
+# file is a one-line stub that execs this with its own name.
+#
+# 1. If the user has a global core.hooksPath, run the global hook of the
+#    same name first — a repo-local hooksPath would otherwise silently
+#    disable it.
+# 2. Then run the repo-specific logic (only pre-commit and pre-push
+#    have any).
+#
+# Install: `just hooks`. Bypass once: `--no-verify`. Remove: `just unhook`.
+set -eu
+
+hook="$1"
+shift
+
+global_hooks="$(git config --global --get core.hooksPath 2>/dev/null || true)"
+if [ -n "$global_hooks" ] && [ -x "$global_hooks/$hook" ]; then
+    "$global_hooks/$hook" "$@"
+fi
+
+case "$hook" in
+pre-commit)
+    # Cheapest layer: ruff on the staged Python files only (<1s).
+    # Fixes are re-staged for fully-staged files. A partially staged
+    # file that ruff modified aborts the commit instead of staging
+    # hunks you never reviewed.
+    staged="$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')"
+    [ -n "$staged" ] || exit 0
+
+    partial=""
+    for f in $staged; do
+        git diff --quiet -- "$f" || partial="$partial $f"
+    done
+
+    # shellcheck disable=SC2086
+    uv run --frozen ruff format --quiet $staged
+    # shellcheck disable=SC2086
+    uv run --frozen ruff check --fix --quiet $staged
+
+    for f in $partial; do
+        if ! git diff --quiet -- "$f"; then
+            printf 'pre-commit: %s is partially staged and ruff changed it.\n' "$f" >&2
+            printf 'pre-commit: review, `git add` the file, and commit again.\n' >&2
+            exit 1
+        fi
+    done
+    # shellcheck disable=SC2086
+    git add $staged
+    ;;
+pre-push)
+    # Same checks CI runs (lint, format, full suite) — ~5s. Catching
+    # a failure here saves a failed-CI round trip.
+    exec just check
+    ;;
+esac

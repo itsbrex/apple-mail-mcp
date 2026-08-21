@@ -303,9 +303,58 @@ result = sync_from_disk(conn, mail_dir, progress_callback)
 ## Coding Standards
 
 - **Python 3.11+**, type hints required
-- **Formatter**: `uv run ruff format src/`
-- **Linter**: `uv run ruff check src/`
+- **Formatter / linter**: ruff, scoped to `src/ tests/` (`just fmt`, `just lint`)
 - Line length: 80 characters
+
+## Developer Workflow
+
+`just` is the single entry point; every recipe is a thin wrapper over
+uv/ruff/pytest (`just --list`). The suite is ~3s and fully mocked
+(no Mail.app, no `~/Library/Mail` — see `tests/conftest.py`).
+
+| Intent | Command | Cost |
+|--------|---------|------|
+| One-time setup (deps + git hooks) | `just setup` | — |
+| Inner loop, one file | `just test tests/test_server.py -k name` | <1s |
+| Rerun last failures | `just tf` | <1s |
+| Everything CI runs, same order | `just check` | ~5s |
+| Live check against real Mail.app | `just smoke` (`SMOKE_ACCOUNT=…`) | ~20s |
+| Advisory type check | `just typecheck [paths]` | ~2s |
+| Cut a release | `just release X.Y.Z [--push]` | — |
+
+**Layers of checks, cheapest first:** Claude Code `PostToolUse` hook runs
+ruff on the file just edited (`.claude/hooks/ruff-on-edit.sh`, ~100ms) →
+`pre-commit` runs ruff on staged files → `pre-push` runs `just check` →
+CI runs the same on 3 Python versions. Green `just check` == green CI.
+
+**Definition of done for any change:** `just check` green; CHANGELOG
+`[Unreleased]` entry for user-visible changes; docs/tables updated when
+`tests/test_release_metadata.py` says so. For JXA-path changes also
+`just smoke`. Say explicitly if smoke was not run.
+
+**Drift guards** (`tests/test_release_metadata.py`): `pyproject.toml` ↔
+`server.json` versions, CHANGELOG section for the current version, and
+the tool roster in `server.py` ↔ counts/tables in README, CLAUDE.md,
+docs/. They fail with the list of files to fix.
+
+### Agent delegation (Claude subagents, Codex)
+
+Token spend is a budget, not a by-product. Defaults:
+
+- **Do it inline** when one focused agent can finish it. No swarms for
+  single-file edits or a test run.
+- **Parallelize only independent work** (e.g. one agent per write tool
+  when each owns disjoint functions + tests). Give each a narrow brief:
+  goal, the files it owns, the contract in `.claude/skills/write-tool`,
+  and "return a ≤10-line summary + `just check` result".
+- **Hand over findings, not re-research.** Pass `file:line` pointers
+  and the relevant paragraph; never the whole conversation or repo.
+- **No recursive delegation** without a stated reason.
+- **Stop at the acceptance criterion** (`just check` green + checklist);
+  verification depth scales with blast radius — a doc change needs no
+  review agent, a new JXA write path gets one reviewer on the diff.
+- Skills: `write-tool` (new mutating MCP tool), `jxa-debug` (live
+  Mail.app failures). Invoke them instead of re-deriving the checklist.
 
 ## Adding New Query Tools
 
@@ -324,18 +373,31 @@ async def get_emails(
         query = query.where("data.flaggedStatus[i] === true")
 ```
 
-For completely new operations, use `execute_with_core_async()`:
+For completely new operations, use `execute_with_core_async()`.
+**Write tools** (anything that mutates mail) follow the `write-tool`
+skill: `_ensure_writable()` first (enforced by an AST test), hidden-
+account gate, `json.dumps()` for every string that enters the script,
+bounded batches, and the new state in the return value:
 
 ```python
-from .executor import execute_with_core_async
-
 @mcp.tool
-async def mark_as_read(message_id: int) -> dict:
-    """Mark a message as read."""
-    script = f"""
-const msg = Mail.messages.byId({message_id});
-msg.readStatus = true;
-JSON.stringify({{success: true, id: {message_id}}});
+async def update_email_status(
+    message_id: int,
+    read: bool | None = None,
+    account: str | None = None,
+    mailbox: str | None = None,
+) -> dict:
+    """Set read status. Returns the resulting state."""
+    _ensure_writable()
+    if _hidden_account(account):
+        raise ValueError(f"Message {message_id} not found.")
+    setup = build_mailbox_setup_js(
+        await _resolve_visible_account(account), _resolve_mailbox(mailbox)
+    )
+    script = f"""{setup}
+const msg = mailbox.messages.byId({json.dumps(message_id)});
+if ({json.dumps(read)} !== null) msg.readStatus = {json.dumps(read)};
+JSON.stringify({{id: msg.id(), read: msg.readStatus()}});
 """
     return await execute_with_core_async(script)
 ```
@@ -375,34 +437,17 @@ apple-mail-mcp integrate claude  # Generate a Claude Code skill file
 
 ## Testing
 
-### Unit Tests
-
-```bash
-# Run all tests
-uv run pytest
-
-# Run with verbose output
-uv run pytest -v
-
-# Run specific test file
-uv run pytest tests/test_search.py
-```
-
-### Manual Testing
-
-```bash
-# Import test
-uv run python -c "from apple_mail_mcp import mcp; print('OK')"
-
-# Test index
-uv run python -c "
-from apple_mail_mcp.index import IndexManager
-m = IndexManager.get_instance()
-if m.has_index():
-    stats = m.get_stats()
-    print(f'Emails: {stats.email_count}')
-"
-```
+- `just test [pytest args]` — unit suite (~3s, 500+ tests, all JXA
+  mocked, real `~/Library/Mail` stubbed by `tests/conftest.py`).
+  A test that needs the real directory lookup against a sandboxed
+  `Path.home` opts in with `@pytest.mark.real_mail_dir`.
+- `just smoke [step]` — runs each read tool through the CLI against the
+  real Mail.app + index and checks JSON shape + timing. Steps:
+  `status accounts mailboxes emails search read`. Targets the first
+  account unless `SMOKE_ACCOUNT=` is set, so a stale
+  `APPLE_MAIL_DEFAULT_ACCOUNT` in local config can't look like a bug.
+- Tests that mock `execute_with_core_async` assert on the generated
+  script text — that is the contract for JXA builders.
 
 ## Git Workflow & CI/CD
 
@@ -417,25 +462,26 @@ if m.has_index():
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `lint.yml` | Push/PR to `main` | `ruff check src/` + `ruff format --check src/` |
-| `release.yml` | Tag push (`v*`) | `uv build` → PyPI publish → GitHub Release |
+| `lint.yml` | Push/PR to `main` | `ruff check` + `ruff format --check` on `src/ tests/`; pytest on macOS × Python 3.11/3.12/3.13. Mirrored locally by `just check`. |
+| `release.yml` | Tag push (`v*`) | `uv build` → PyPI publish → GitHub Release → MCP registry |
+| `docs.yml` | Push to `main` touching `docs/**` | zensical build → GitHub Pages |
 
 ### Releasing
 
 A single tag push triggers the full pipeline: **build → PyPI publish → GitHub Release**.
 
-**Pre-release checklist** (all version strings must match):
-1. `pyproject.toml` → `version = "0.X.Y"`
-2. `server.json` → `"version"` and `packages[0].version`
-3. Run lint + format + tests (see Pre-push Checklist)
-4. Commit, tag, and push:
-
 ```bash
-git add pyproject.toml server.json
-git commit -m "Bump version to 0.X.Y"
-git tag v0.X.Y
-git push origin main v0.X.Y
+# 1. Add a `## [X.Y.Z] - YYYY-MM-DD` section to CHANGELOG.md (rename [Unreleased])
+# 2. From a clean, up-to-date main:
+just release X.Y.Z          # bumps pyproject.toml + server.json, uv lock,
+                            # runs `just check`, commits, tags — no push
+just release X.Y.Z --push   # ...and pushes main + tag (irreversible: publishes)
 ```
+
+`scripts/release.sh` refuses to run off `main`, with a dirty tree, out
+of sync with `origin/main`, without a CHANGELOG section, or if the tag
+exists. `tests/test_release_metadata.py` keeps the version carriers in
+lockstep between releases.
 
 **What happens automatically:**
 1. `build` job — `uv build` creates sdist + wheel
@@ -450,11 +496,8 @@ Both PyPI and GitHub Releases stay in sync from a single `git push`.
 
 ### Pre-push Checklist
 
-```bash
-uv run ruff check src/       # Lint
-uv run ruff format --check src/  # Format check
-uv run pytest                 # Tests (requires macOS + Mail.app)
-```
+`just check` — or install the hooks once with `just hooks` and
+`pre-push` runs it for you (`git push --no-verify` to bypass).
 
 ## Critical: JXA Performance
 
