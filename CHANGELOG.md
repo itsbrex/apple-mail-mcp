@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Developer workflow overhaul** — `justfile` task runner (`just check` is the local mirror of CI), targeted `just test-changed`, opt-in git hooks (`just hooks`: staged-file ruff on commit, changed-file tests on push), `scripts/release.sh` collapsing the 4-step release checklist, `scripts/smoke.sh` for real-Mail.app verification, Claude Code project settings + skills (`.claude/`) and an `AGENTS.md` mirror for Codex. Test suite wall time drops from ~280s to ~3s: nine `test_manager.py` tests were walking the developer's real `~/Library/Mail`; a conftest guard now keeps the whole suite off it. `tests/` is in the ruff lint scope. New `tests/test_release_metadata.py` fails the build when `pyproject.toml`/`server.json` versions diverge, when the `CHANGELOG.md` lacks a section for the current version, or when the tool roster in `server.py` drifts from the counts and tables in README/CLAUDE.md/docs.
+- **Type checking is a gate.** `ty` (pinned in the dev group) runs in `just check` and CI after ruff; the 27 pre-existing diagnostics are fixed. `fastmcp` is bumped from `3.0.0b1` to `>=3.4.7` — the beta typed `@mcp.tool` as returning a `FunctionTool`, which made every direct call of a tool (the CLI, the deprecated `get_attachment` alias) a type error; 3.4 returns the decorated function. The CLI `--scope`/`--filter` options are now `Literal` types, so an invalid value is rejected at parse time with the list of choices instead of reaching the server.
+
+### Fixed
+
+- **`date_received` from the `.emlx` plist footer was never used.** The fallback for a message whose headers carry no `Date` referenced `datetime.UTC` on the *class* (the constant lives on the module), raised `AttributeError` inside a best-effort `except Exception`, and silently left `date_received` empty. Surfaced by the type checker. (`index/disk.py`)
 
 ## [0.4.3] - 2026-07-30
 

@@ -317,9 +317,9 @@ uv/ruff/pytest (`just --list`). The suite is ~3s and fully mocked
 | One-time setup (deps + git hooks) | `just setup` | — |
 | Inner loop, one file | `just test tests/test_server.py -k name` | <1s |
 | Rerun last failures | `just tf` | <1s |
-| Everything CI runs, same order | `just check` | ~5s |
+| Everything CI runs, same order | `just check` | ~6s |
 | Live check against real Mail.app | `just smoke` (`SMOKE_ACCOUNT=…`) | ~20s |
-| Advisory type check | `just typecheck [paths]` | ~2s |
+| Type check only (part of `check`) | `just typecheck [paths]` | ~2s |
 | Cut a release | `just release X.Y.Z [--push]` | — |
 
 **Layers of checks, cheapest first:** Claude Code `PostToolUse` hook runs

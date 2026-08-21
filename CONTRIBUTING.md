@@ -69,7 +69,7 @@ All changes should include tests.
 ```bash
 just test tests/test_server.py -k "read_only"   # inner loop, <1s
 just tf                                         # rerun last failures
-just check                                      # lint + format + full suite (= CI)
+just check                                      # lint + format + types + full suite (= CI)
 ```
 
 Tests use `pytest` with `pytest-asyncio`. The suite mocks JXA and stubs

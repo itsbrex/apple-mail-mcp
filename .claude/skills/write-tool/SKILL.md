@@ -53,7 +53,7 @@ tool per verb.
 ## Verify
 
 ```bash
-just check                       # lint + format + 500+ tests, ~5s
+just check                       # lint + format + types + 500+ tests, ~6s
 SMOKE_ACCOUNT=iCloud just smoke  # read tools still work live (optional)
 ```
 

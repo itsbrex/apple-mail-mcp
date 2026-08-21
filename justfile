@@ -4,7 +4,7 @@
 #
 # Inner loop:   just test tests/test_server.py      (one file, <1s)
 #               just tf                             (rerun failures)
-# Before push:  just check                          (= CI, ~5s)
+# Before push:  just check                          (= CI, ~6s)
 # Release:      just release 0.5.0 [--push]
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
@@ -42,12 +42,12 @@ tf:
     uv run --frozen pytest -q --lf -x
 
 # Everything CI checks, in CI order. Green here == green CI.
-check: lint fmt-check test
+check: lint fmt-check typecheck test
 
+# Type check (ty, pinned in the dev group). Gate since 0.5.0.
 # Pass paths to scope it: `just typecheck src/apple_mail_mcp/server.py`.
-# Advisory (ty) — not a gate: ~27 pre-existing diagnostics in src/
 typecheck *PATHS="src/":
-    uvx ty check {{PATHS}}
+    uv run --frozen ty check {{PATHS}}
 
 # Exercise the CLI against the real Mail.app (needs Full Disk Access)
 smoke *ARGS:

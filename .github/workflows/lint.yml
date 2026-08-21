@@ -17,7 +17,7 @@ concurrency:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Local mirror: `just check` runs the same three commands in the same
+# Local mirror: `just check` runs the same four commands in the same
 # order. Keep them in sync — green locally must mean green here.
 jobs:
   lint:
@@ -30,6 +30,7 @@ jobs:
       - run: uv sync --frozen --group dev
       - run: uv run --frozen ruff check src/ tests/
       - run: uv run --frozen ruff format --check src/ tests/
+      - run: uv run --frozen ty check src/
 
   # macOS runner: the project is macOS-only, and the whole suite runs
   # without Mail.app present (JXA is mocked; the real ~/Library/Mail is

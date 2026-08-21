@@ -131,7 +131,7 @@ apple-mail-mcp integrate claude > ~/.claude/skills/apple-mail.md
 git clone https://github.com/imdinu/apple-mail-mcp
 cd apple-mail-mcp
 just setup   # uv sync + git hooks
-just check   # lint + format + tests (~5s, same as CI)
+just check   # lint + format + types + tests (~6s, same as CI)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.

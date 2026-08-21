@@ -49,3 +49,6 @@ benchmarks/results/*.html
 
 # Claude Code per-user plugin state
 .claude/feedback/
+
+# Claude Code agent worktrees
+.claude/worktrees/
