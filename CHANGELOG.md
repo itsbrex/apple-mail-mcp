@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Highlighted search no longer scales with the number of matches.** `search(..., highlight=True)` (the CLI `search` default) ran FTS5 `highlight()`/`snippet()` over *every* matching row before the `ORDER BY score LIMIT` pruned to one page — for a common term on a ~130K-row index that was 1.5–4s per query (`just smoke` measured `search` at ~5s). The highlight path now ranks and filters in a rowid-only subquery and runs the auxiliary functions only on the returned page: ~0.3s for the worst case, 2–6x faster on typical terms, unchanged on rare ones, with identical rows, order, and scores. The unary `+` on the outer rowid (`+emails_fts.rowid IN (...)`) is load-bearing — without it SQLite re-runs the MATCH once per result row.
+- **`get_email()` disk reads skip the JXA account-map load when nothing needs it.** With no `account` hint and no `APPLE_MAIL_INDEX_EXCLUDE_ACCOUNTS`, Strategy 0 needed the name↔UUID map for nothing, yet paid an `osascript` round-trip (~250ms cold) on every cold process — i.e. every CLI `read`. The map still loads whenever an account name or configured exclusions must be translated, so the hidden-account gate is unchanged. The remaining ~1s of CLI wall time is the `fastmcp` import.
+
 ### Changed
 
 - **Developer workflow overhaul** — `justfile` task runner (`just check` is the local mirror of CI), targeted `just test-changed`, opt-in git hooks (`just hooks`: staged-file ruff on commit, changed-file tests on push), `scripts/release.sh` collapsing the 4-step release checklist, `scripts/smoke.sh` for real-Mail.app verification, Claude Code project settings + skills (`.claude/`) and an `AGENTS.md` mirror for Codex. Test suite wall time drops from ~280s to ~3s: nine `test_manager.py` tests were walking the developer's real `~/Library/Mail`; a conftest guard now keeps the whole suite off it. `tests/` is in the ruff lint scope. New `tests/test_release_metadata.py` fails the build when `pyproject.toml`/`server.json` versions diverge, when the `CHANGELOG.md` lacks a section for the current version, or when the tool roster in `server.py` drifts from the counts and tables in README/CLAUDE.md/docs.
