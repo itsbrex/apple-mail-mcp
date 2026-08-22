@@ -65,14 +65,22 @@ run emails   'type=="array" and length>0 and .[0].id' \
 run search   '(type=="array" and length>0) or (type=="object" and has("hint"))' \
     cli search "$query" --limit 3
 
-# read: take the first id from `emails` and fetch it fully.
+# read: fetch an *indexed* message (first hit of `search`, which only
+# returns index rows) so this measures the documented disk-first path.
+# The newest message from `emails` is usually not in the index yet
+# unless a `serve` has synced recently, and a miss there falls back to
+# a JXA walk of the whole mailbox (~10s on a 5K-message INBOX) — a real
+# behaviour, but a misleading number for a smoke timing.
 if [[ -z "$only" || "$only" == "read" ]]; then
-    id="$(cli emails --account "$account" --limit 1 | jq -r '.[0].id // empty')"
-    if [[ -n "$id" ]]; then
+    hit="$(cli search "$query" --account "$account" --limit 1 \
+        | jq -r 'if type=="array" and length>0 then "\(.[0].id) \(.[0].mailbox)" else empty end')"
+    if [[ -n "$hit" ]]; then
+        id="${hit%% *}"; mailbox="${hit#* }"
         run read 'has("subject") and has("content")' \
-            cli read "$id" --account "$account" --mailbox INBOX
+            cli read "$id" --account "$account" --mailbox "$mailbox"
     else
-        printf '✗ %-10s no message id available from `emails`\n' read >&2
+        printf '✗ %-10s no indexed message for %q in %s (run `just index`?)\n' \
+            read "$query" "$account" >&2
         fail=1
     fi
 fi
