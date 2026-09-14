@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Domain glossary and identity ADR.** `CONTEXT.md` defines mail terminology,
+  identity, access boundaries, outgoing-mail states, and search coverage.
+  `docs/adr/0001-scoped-email-identity.md` records the existing scoped index
+  identity and distinguishes numeric Mail IDs from Internet Message-ID headers.
+
 - **Write tools (opt-out via read-only mode).** Three consolidated mutating tools, each a thin JXA call that returns the resulting state rather than `{"success": true}`: `update_email_status(message_ids, read?, flagged?)` marks read/unread and flags/unflags (#64, supersedes #24); `move_email(message_ids, target_mailbox)` moves to any mailbox — `Archive` and `Trash` are just targets — resolving the destination before touching a message so an unknown target is a clean `ValueError` (#65, supersedes #23); `send_email(to, subject, body, cc?, bcc?, account?, confirm=False)` composes through `Mail.OutgoingMessage` and **saves a draft unless `confirm=True`**, so an agent has to surface the content before anything leaves the machine (#22). All three call `_ensure_writable()` first (`APPLE_MAIL_READ_ONLY` / `serve -r` refuse with `PermissionError`), never fall through to a hidden account (#90), and clamp `message_ids` to `MAX_WRITE_BATCH = 10`. `move_email` evicts the stale index row for the source mailbox as soon as Mail.app confirms the move, so an immediate `search()` cannot return a ghost; the watcher re-indexes the message in its new mailbox (#66, optimistic update). CLI twins: `apple-mail-mcp mark`, `move`, `send`.
 
 ### Performance

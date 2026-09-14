@@ -47,6 +47,10 @@ src/apple_mail_mcp/
 
 ## Making Changes
 
+Use the [domain glossary](CONTEXT.md) for mail terminology and boundaries.
+Keep it implementation-free; durable architectural trade-offs belong in
+[architecture decision records](docs/adr/).
+
 ### Branching
 
 - Create a feature branch from `main`: `git checkout -b feat/your-feature`
