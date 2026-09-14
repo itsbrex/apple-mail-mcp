@@ -69,6 +69,31 @@ class TestVersionLockstep:
             "server.json packages[0].version"
         )
 
+    @pytest.mark.parametrize(
+        ("rel", "keys"),
+        [
+            ("plugin/.claude-plugin/plugin.json", ("version",)),
+            (".claude-plugin/marketplace.json", ("plugins", 0, "version")),
+            ("mcpb/manifest.json", ("version",)),
+        ],
+    )
+    def test_distribution_versions_agree(
+        self, rel: str, keys: tuple[str | int, ...]
+    ) -> None:
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        version = pyproject["project"]["version"]
+        actual = json.loads((ROOT / rel).read_text())
+        for key in keys:
+            actual = actual[key]
+        assert actual == version, f"{rel}: release version differs"
+
+    def test_lockfile_project_version_agrees(self) -> None:
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        lock = tomllib.loads((ROOT / "uv.lock").read_text())
+        packages = [p for p in lock["package"] if p["name"] == "apple-mail-mcp"]
+        assert len(packages) == 1
+        assert packages[0]["version"] == pyproject["project"]["version"]
+
     def test_changelog_has_entry_for_current_version(self):
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
         version = pyproject["project"]["version"]

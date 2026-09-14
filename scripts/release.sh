@@ -7,7 +7,7 @@
 #   scripts/release.sh 0.5.0          # bump + commit + tag, print push cmd
 #   scripts/release.sh 0.5.0 --push   # ...and push main + tag
 #
-# Collapses the 4-step manual checklist in CLAUDE.md "Releasing".
+# Automates the release metadata checklist in CLAUDE.md "Releasing".
 set -euo pipefail
 
 version="${1:-}"
@@ -37,9 +37,47 @@ current="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)"
 [[ "$current" != "$version" ]] || die "pyproject.toml is already $version"
 
 # Bump every version carrier. tests/test_release_metadata.py asserts
-# these stay in lockstep, so a missed file fails `just check`.
-sed -i '' "s/^version = \"$current\"/version = \"$version\"/" pyproject.toml
-sed -i '' "s/\"version\": \"$current\"/\"version\": \"$version\"/g" server.json
+# these stay in lockstep. Validate all fields before writing any file;
+# marketplace metadata.version is independent of its plugin version.
+python3 - "$current" "$version" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+current, version = sys.argv[1:]
+fields = {
+    "server.json": [("version",), ("packages", 0, "version")],
+    "plugin/.claude-plugin/plugin.json": [("version",)],
+    ".claude-plugin/marketplace.json": [("plugins", 0, "version")],
+    "mcpb/manifest.json": [("version",)],
+}
+updates = {}
+for filename, paths in fields.items():
+    document = json.loads(Path(filename).read_text())
+    for path in paths:
+        parent = document
+        for key in path[:-1]:
+            parent = parent[key]
+        if parent[path[-1]] != current:
+            raise SystemExit(
+                f"release: {filename} version does not match {current}"
+            )
+        parent[path[-1]] = version
+    updates[filename] = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+
+project, count = re.subn(
+    rf'^version = "{re.escape(current)}"$',
+    f'version = "{version}"',
+    Path("pyproject.toml").read_text(),
+    flags=re.MULTILINE,
+)
+if count != 1:
+    raise SystemExit("release: expected one project version in pyproject.toml")
+updates["pyproject.toml"] = project
+for filename, content in updates.items():
+    Path(filename).write_text(content)
+PY
 
 uv lock -q
 
@@ -47,8 +85,10 @@ uv lock -q
 # guards in tests/test_release_metadata.py.
 just check
 
-git add pyproject.toml server.json uv.lock
-git commit -q -m "Bump version to $version"
+git add pyproject.toml server.json uv.lock \
+    plugin/.claude-plugin/plugin.json \
+    .claude-plugin/marketplace.json mcpb/manifest.json
+git commit -q -m "🔖 chore(release): bump version to $version"
 git tag "v$version"
 
 printf 'release: committed + tagged v%s\n' "$version"

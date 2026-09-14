@@ -8,7 +8,7 @@ Thanks for your interest in contributing! This guide will help you get started.
 
 2. **Clone and install** (deps + git hooks + global development command):
    ```bash
-   git clone https://github.com/imdinu/apple-mail-mcp.git
+   git clone https://github.com/itsbrex/apple-mail-mcp.git
    cd apple-mail-mcp
    just setup
    ```

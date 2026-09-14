@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-The only Apple Mail MCP server with full-coverage FTS5 body search. Reliable on large mailboxes (tested at ~73K messages) where AppleScript-based servers timeout, and the only one whose body search has no recency cap. Disk-first email reads (~3ms via .emlx parsing), batch JXA property fetching, and an FTS5 search index for full-text body search (~28ms).
+The only Apple Mail MCP server with full-coverage FTS5 body search. Reliable on large mailboxes (tested at ~73K messages) where AppleScript-based servers timeout, and the only one whose body search has no recency cap. Disk-first email reads (~3ms via .emlx parsing), batch JXA property fetching, and an FTS5 search index for full-text body search (~2ms, BM25-ranked).
 
 ## Project Structure
 
@@ -18,6 +18,8 @@ src/apple_mail_mcp/
 │   ├── __init__.py     # Exports IndexManager
 │   ├── schema.py       # SQLite schema v5 (DLQ + attachments)
 │   ├── lock.py         # IndexLock — cross-process single-writer flock (#106)
+│   ├── accounts.py     # AccountMap — account name↔UUID cache
+│   ├── envelope_direct.py  # Direct Envelope Index SQLite reads (get_emails fast path)
 │   ├── manager.py      # IndexManager class (disk-based sync)
 │   ├── disk.py         # .emlx reading + get_disk_inventory()
 │   ├── sync.py         # Disk-based state reconciliation
@@ -64,8 +66,8 @@ get_emails(filter="last_7_days")  # Last 7 days
 
 ```python
 search("invoice")                          # Search everywhere (FTS5)
-search("john@", scope="sender")            # Sender only (JXA)
-search("meeting", scope="subject")         # Subject only (JXA)
+search("john@", scope="sender")            # Sender only (FTS5 column; JXA fallback without index)
+search("meeting", scope="subject")         # Subject only (FTS5 column; JXA fallback without index)
 search("deadline", scope="body")           # Body only (FTS5)
 search("pdf", scope="attachments")         # By attachment filename (SQL)
 search("invoice", after="2025-01-01")      # Date-range filtering
@@ -492,10 +494,20 @@ apple-mail-mcp integrate claude  # Generate a Claude Code skill file
 
 A single tag push triggers the full pipeline: **build → PyPI publish → GitHub Release**.
 
+`just release` keeps all release version carriers in sync:
+
+- `pyproject.toml` → `version`
+- `server.json` → `version` and `packages[0].version`
+- `plugin/.claude-plugin/plugin.json` → `version`
+- `.claude-plugin/marketplace.json` → `plugins[0].version`
+- `mcpb/manifest.json` → `version` (also names the `.mcpb` asset)
+
+The marketplace's independent `metadata.version` stays unchanged.
+
 ```bash
 # 1. Add a `## [X.Y.Z] - YYYY-MM-DD` section to CHANGELOG.md (rename [Unreleased])
 # 2. From a clean, up-to-date main:
-just release X.Y.Z          # bumps pyproject.toml + server.json, uv lock,
+just release X.Y.Z          # bumps all five version files + uv.lock,
                             # runs `just check`, commits, tags — no push
 just release X.Y.Z --push   # ...and pushes main + tag (irreversible: publishes)
 ```
@@ -508,7 +520,24 @@ lockstep between releases.
 **What happens automatically:**
 1. `build` job — `uv build` creates sdist + wheel
 2. `publish` job — uploads to PyPI via OIDC trusted publisher (no tokens)
-3. `github-release` job — creates a GitHub Release with auto-generated notes
+3. `github-release` job — builds the `.mcpb` bundle (`mcpb/build.sh`) and creates a GitHub Release with auto-generated notes and the bundle attached
+
+## Distribution Packaging
+
+Three install surfaces, all serving the released PyPI package — nothing is vendored:
+
+These launchers use the upstream release, not this fork's source or its
+checkout-bound development command. Fork-only write tools and development
+changes require the global development command described above. Installing
+the plugin or bundle does not select or relink a development checkout.
+
+| Surface | Files | Install command |
+|---------|-------|-----------------|
+| **Claude Code plugin** | `.claude-plugin/marketplace.json` (marketplace `imdinu`), `plugin/.claude-plugin/plugin.json`, `plugin/start.sh` | `claude plugin marketplace add imdinu/apple-mail-mcp` then `claude plugin install apple-mail@imdinu` |
+| **Claude Desktop bundle** | `mcpb/manifest.json`, `mcpb/build.sh` (zips manifest + `plugin/start.sh` → `dist/apple-mail-mcp-<version>.mcpb`) | Download from GitHub Release, double-click |
+| **PyPI** | `pyproject.toml` | `pipx install apple-mail-mcp` |
+
+`plugin/start.sh` is the single canonical launcher (uvx → pipx → private-venv fallback, `serve --watch`); the `.mcpb` build copies it into the bundle. It prepends `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin` to PATH because MCP hosts launch servers with a minimal environment.
 
 Both PyPI and GitHub Releases stay in sync from a single `git push`.
 

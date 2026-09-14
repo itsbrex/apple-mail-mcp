@@ -304,6 +304,29 @@ _FDA_STEPS = (
     "(System Settings → Privacy & Security → Full Disk Access)."
 )
 
+_NO_INDEX_DATE_MESSAGE = (
+    "Date filtering (before/after) requires the search "
+    "index. Run 'apple-mail-mcp index' to build it."
+)
+
+
+def _disk_permission_message(what: str, message_id: int) -> str:
+    """Explain a denied read of an email's file on disk.
+
+    Reported distinctly from "not found": the metadata paths work
+    without Full Disk Access, so the item likely exists — only the
+    raw file read is refused. On macOS, stat() on a TCC-protected
+    file succeeds and only the read fails, which otherwise makes
+    this look like a data bug (#109).
+    """
+    return (
+        f"Cannot {what} for email {message_id}: reading the email "
+        "file on disk was denied. This is a permission problem, not "
+        "a missing item — grant Full Disk Access to the process "
+        "running this server (System Settings → Privacy & Security "
+        "→ Full Disk Access), then retry."
+    )
+
 
 def _no_index_message(manager, what: str) -> str:
     """Explain that an unbuilt index cannot answer this search.
@@ -671,9 +694,13 @@ async def get_emails(
                 ]
     except (
         FileNotFoundError,
+        PermissionError,
         sqlite3.OperationalError,
         MailboxNotFoundError,
     ) as exc:
+        # PermissionError: find_mail_directory() raises it when Full
+        # Disk Access is not granted. Without it here, get_emails()
+        # errors instead of falling back to JXA on no-FDA installs.
         logger.debug(
             "Envelope Index fast path unavailable (%s); falling back to JXA",
             exc,
@@ -805,8 +832,9 @@ async def get_email(
         The attachments list comes from JXA's mailAttachments(),
         which only reports file attachments visible in Mail.app's
         UI. Inline images, S/MIME signatures, and attachments in
-        sent/bounce-back emails may not appear. Use get_attachment
-        with a known filename for reliable extraction from disk.
+        sent/bounce-back emails may not appear. Use
+        get_email_attachment() with a known filename for reliable
+        extraction from disk.
 
     Example:
         >>> get_email(12345)
@@ -1127,7 +1155,14 @@ async def get_email_links(
     emlx_path = await _resolve_emlx_path(message_id, account, mailbox)
     from .index.disk import get_email_links as _get_links
 
-    link_infos = await asyncio.to_thread(_get_links, emlx_path)
+    try:
+        link_infos = await asyncio.to_thread(_get_links, emlx_path)
+    except PermissionError as exc:
+        # Without this, a denied read returns [] — "this email has
+        # no links" — and the permission problem stays invisible.
+        raise RuntimeError(
+            _disk_permission_message("extract links", message_id)
+        ) from exc
     return {
         "links": [{"url": li.url, "text": li.text} for li in link_infos],
     }
@@ -1172,9 +1207,19 @@ async def get_email_attachment(
     emlx_path = await _resolve_emlx_path(message_id, account, mailbox)
     from .index.disk import get_attachment_content
 
-    result = await asyncio.to_thread(
-        get_attachment_content, emlx_path, filename
-    )
+    try:
+        result = await asyncio.to_thread(
+            get_attachment_content, emlx_path, filename
+        )
+    except PermissionError as exc:
+        # Without this, a denied read collapses into None and the
+        # message below claims the attachment doesn't exist — while
+        # get_email() happily lists it (#109).
+        raise RuntimeError(
+            _disk_permission_message(
+                f"read attachment '{filename}'", message_id
+            )
+        ) from exc
     if result is None:
         raise ValueError(
             f"Attachment '{filename}' not found in email {message_id}."
@@ -1305,10 +1350,6 @@ async def search(
     if exclude_mailboxes is None:
         exclude_mailboxes = ["Drafts"]
 
-    if _hidden_account(account):
-        # Hidden account explicitly requested: no results, no fallback.
-        return []
-
     _EMPTY_HINT = (
         "No results. Try fewer keywords (2-3 specific terms), "
         "check spelling, or use scope='all' to search everywhere."
@@ -1331,6 +1372,24 @@ async def search(
         if _index_is_empty(manager):
             return {"result": [], "hint": _empty_index_message(manager)}
         return {"result": [], "hint": _EMPTY_HINT}
+
+    if _hidden_account(account):
+        # Hidden account explicitly requested: no backend may touch
+        # it, but the response must be byte-identical to what a
+        # name that matches nothing would produce in the same state
+        # (#90) — a distinct shape here is an oracle revealing which
+        # account names are excluded.
+        if scope == "attachments" and not indexed:
+            raise ValueError(
+                _no_index_message(manager, "Attachment filename search")
+            )
+        if scope == "attachments" or indexed:
+            return _maybe_hint([])
+        if scope == "body":
+            raise ValueError(_no_index_message(manager, "Body search"))
+        if before or after:
+            raise ValueError(_NO_INDEX_DATE_MESSAGE)
+        return _maybe_hint([])
 
     # Attachment filename search (SQL LIKE query, no JXA needed)
     if scope == "attachments":
@@ -1453,10 +1512,7 @@ async def search(
 
     # Date filtering and highlight require the FTS5 index
     if before or after:
-        raise ValueError(
-            "Date filtering (before/after) requires the search "
-            "index. Run 'apple-mail-mcp index' to build it."
-        )
+        raise ValueError(_NO_INDEX_DATE_MESSAGE)
 
     # JXA-based search for subject/sender or when no index
     if _excluded_account_names() and (
@@ -1465,8 +1521,9 @@ async def search(
         # With exclusions active, a None target means no visible
         # account exists — JXA would scan Mail.accounts()[0], a hidden
         # one. (The name check is defense-in-depth; the resolver never
-        # returns a hidden name.)
-        return []
+        # returns a hidden name.) Same shape as an empty JXA result,
+        # for the same oracle reason as the hidden-account gate (#90).
+        return _maybe_hint([])
 
     safe_query_js = json.dumps(query.lower())
 
