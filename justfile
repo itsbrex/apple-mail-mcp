@@ -14,9 +14,21 @@ py_dirs := "src/ tests/"
 _default:
     @just --list --unsorted
 
-# One-time: deps + git hooks
-setup: && hooks
-    uv sync --group dev
+# One-time: locked deps + git hooks + global command bound to this checkout
+setup: && hooks dev-link
+    uv sync --locked --group dev --extra watch
+
+# Install/relink the global development command (preserves the old executable)
+dev-link:
+    uv run --frozen python scripts/dev_link.py install
+
+# Check that uv's global command is bound to this checkout
+dev-status:
+    uv run --frozen python scripts/dev_link.py status
+
+# Restore the executable that preceded the development link
+dev-unlink:
+    uv run --frozen python scripts/dev_link.py uninstall
 
 # ---- verify ---------------------------------------------------------
 

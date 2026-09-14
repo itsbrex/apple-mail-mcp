@@ -27,13 +27,30 @@ For development or to run the latest unreleased version:
 ```bash
 git clone https://github.com/imdinu/apple-mail-mcp
 cd apple-mail-mcp
-uv sync
+just setup
 ```
 
-Run with:
+This installs locked dependencies, Git hooks, and a global `apple-mail-mcp`
+launcher bound to this checkout. Every new launch uses editable source and
+syncs this repo's `uv.lock`; source edits need no reinstall. Dependency or
+metadata changes require `uv lock` first. Restart an existing MCP session
+when you want it to load changed code.
 
 ```bash
-uv run apple-mail-mcp
+just dev-status  # inspect the global link
+apple-mail-mcp --help
+just dev-unlink  # restore the previous executable
+```
+
+Use the absolute launcher path printed by `just dev-status` in MCP clients.
+Commands using `uvx`, `pipx run`, or another environment bypass this link.
+See the [development workflow](https://github.com/imdinu/apple-mail-mcp/blob/main/CONTRIBUTING.md#global-development-command)
+for relinking, worktrees, and backup behavior.
+
+To run directly from a checkout without installing a global launcher:
+
+```bash
+uv run --locked --extra watch apple-mail-mcp
 ```
 
 ## Prerelease Versions

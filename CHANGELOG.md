@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Global development launcher.** `just setup` now binds the global
+  `apple-mail-mcp` command to the current checkout, with editable source and
+  locked dependency sync on each launch. `just dev-link`, `just dev-status`,
+  and `just dev-unlink` manage the link and preserve the previous executable
+  for rollback. Source edits need no reinstall; running MCP sessions still
+  need a restart. Status validates the pinned uv executable even when PATH
+  selects a different shim. No editor-specific reinstall hook is required.
+
 - **Domain glossary and identity ADR.** `CONTEXT.md` defines mail terminology,
   identity, access boundaries, outgoing-mail states, and search coverage.
   `docs/adr/0001-scoped-email-identity.md` records the existing scoped index

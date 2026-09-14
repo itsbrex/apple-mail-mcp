@@ -136,7 +136,7 @@ apple-mail-mcp integrate claude > ~/.claude/skills/apple-mail.md
 ```bash
 git clone https://github.com/imdinu/apple-mail-mcp
 cd apple-mail-mcp
-just setup   # uv sync + git hooks
+just setup   # locked deps + git hooks + global dev command
 just check   # lint + format + types + tests (~6s, same as CI)
 ```
 

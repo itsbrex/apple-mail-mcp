@@ -317,13 +317,29 @@ uv/ruff/pytest (`just --list`). The suite is ~3s and fully mocked
 
 | Intent | Command | Cost |
 |--------|---------|------|
-| One-time setup (deps + git hooks) | `just setup` | — |
+| One-time setup (deps + hooks + global dev command) | `just setup` | — |
+| Link / inspect / undo global dev command | `just dev-link` / `just dev-status` / `just dev-unlink` | — |
 | Inner loop, one file | `just test tests/test_server.py -k name` | <1s |
 | Rerun last failures | `just tf` | <1s |
 | Everything CI runs, same order | `just check` | ~6s |
 | Live check against real Mail.app | `just smoke` (`SMOKE_ACCOUNT=…`) | ~20s |
 | Type check only (part of `check`) | `just typecheck [paths]` | ~2s |
 | Cut a release | `just release X.Y.Z [--push]` | — |
+
+**Global development command:** `just setup` installs a reversible launcher
+in `uv tool dir --bin`, pinned to this checkout. Each new invocation runs
+the repo's editable `.venv` package and syncs locked dependencies, including
+the `watch` extra. Source edits need no reinstall or edit hook. Run `uv lock`
+and review the diff after dependency or metadata changes; stale locks fail
+at launch. Restart/reconnect already-running MCP servers to load new code.
+Use `just dev-status` to inspect the link, `just dev-link` to select this
+checkout or refresh the launcher, and `just dev-unlink` to restore the prior
+executable. Do not replace it with a registry install during development.
+Use the absolute global launcher path for MCP clients: an activated `.venv`
+can shadow the command name and bypass launch-time dependency syncing.
+See [CONTRIBUTING.md](CONTRIBUTING.md#global-development-command) for client
+paths, worktrees, and backup behavior. This workflow applies equally to
+Codex, Claude, terminal edits, and Git branch changes.
 
 **Layers of checks, cheapest first:** Claude Code `PostToolUse` hook runs
 ruff on the file just edited (`.claude/hooks/ruff-on-edit.sh`, ~100ms) →

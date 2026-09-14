@@ -6,7 +6,7 @@ Thanks for your interest in contributing! This guide will help you get started.
 
 1. **Prerequisites**: macOS with Apple Mail configured, Python 3.11+, [uv](https://docs.astral.sh/uv/), [just](https://just.systems) (`brew install just`)
 
-2. **Clone and install** (deps + git hooks):
+2. **Clone and install** (deps + git hooks + global development command):
    ```bash
    git clone https://github.com/imdinu/apple-mail-mcp.git
    cd apple-mail-mcp
@@ -27,6 +27,48 @@ Thanks for your interest in contributing! This guide will help you get started.
 
 `just` (no args) lists every recipe. Each one is a one-line wrapper
 over `uv run …`, so the raw commands stay visible in the `justfile`.
+
+### Global development command
+
+`just setup` binds `apple-mail-mcp` in `uv tool dir --bin` to this checkout.
+The launcher runs this repo's editable package in `.venv`, checks `uv.lock`,
+and syncs dependencies (including the `watch` extra) on every new invocation.
+Python and bundled JXA source edits are therefore available on the next
+launch without a reinstall, commit, or editor-specific hook.
+
+```bash
+just dev-status  # verify which checkout owns the global command
+just dev-link    # install or refresh the launcher for this checkout
+just dev-unlink  # restore the previous executable
+```
+
+After changing dependencies or package metadata, run `uv lock` and review
+the lockfile; the next launch syncs it. A stale lockfile fails explicitly
+instead of being rewritten by an MCP client. Already-running servers keep
+their imported code: reconnect/restart the MCP server after edits. The
+launcher does not restart servers or reload code during mail operations.
+
+The original executable is preserved as `.apple-mail-mcp.before-dev` beside
+the global command, including when it is a symlink. Its uv tool environment
+remains available for rollback. Re-running setup preserves that backup.
+An external replacement with an existing backup is reported for inspection.
+
+Only one checkout owns the global command at a time. Running `just dev-link`
+in another checkout selects it explicitly; branch changes within the linked
+checkout need no relink. Rerun `just dev-link` after moving the repo or
+changing the launcher implementation. Status checks the pinned uv executable;
+a different uv shim on PATH alone does not require relinking. If the pinned
+executable is missing or no longer executable, relink with `just dev-link`.
+For MCP clients, use the absolute
+command path printed by `just dev-status`, or ensure its directory precedes
+other installs on `PATH`. An activated project `.venv` can shadow the global
+name: its command still loads repo source, but bypasses launch-time dependency
+sync. Use the absolute global launcher path for MCP clients, or `uv run` for
+commands inside the activated environment. `uvx`, `pipx run`, and direct
+tool-environment paths also bypass this launcher. Avoid reinstalling the
+registry tool over it.
+
+This uses uv's [editable installs and automatic environment sync](https://docs.astral.sh/uv/concepts/projects/sync/).
 
 ## Project Structure
 
