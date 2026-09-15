@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Global development launcher.** `just setup` now binds the global
+  `apple-mail-mcp` command to the current checkout, with editable source and
+  locked dependency sync on each launch. `just dev-link`, `just dev-status`,
+  and `just dev-unlink` manage the link and preserve the previous executable
+  for rollback. Source edits need no reinstall; running MCP sessions still
+  need a restart. Status validates the pinned uv executable even when PATH
+  selects a different shim. No editor-specific reinstall hook is required.
+
+- **Domain glossary and identity ADR.** `CONTEXT.md` defines mail terminology,
+  identity, access boundaries, outgoing-mail states, and search coverage.
+  `docs/adr/0001-scoped-email-identity.md` records the existing scoped index
+  identity and distinguishes numeric Mail IDs from Internet Message-ID headers.
+
 - **Write tools (opt-out via read-only mode).** Three consolidated mutating tools, each a thin JXA call that returns the resulting state rather than `{"success": true}`: `update_email_status(message_ids, read?, flagged?)` marks read/unread and flags/unflags (#64, supersedes #24); `move_email(message_ids, target_mailbox)` moves to any mailbox — `Archive` and `Trash` are just targets — resolving the destination before touching a message so an unknown target is a clean `ValueError` (#65, supersedes #23); `send_email(to, subject, body, cc?, bcc?, account?, confirm=False)` composes through `Mail.OutgoingMessage` and **saves a draft unless `confirm=True`**, so an agent has to surface the content before anything leaves the machine (#22). All three call `_ensure_writable()` first (`APPLE_MAIL_READ_ONLY` / `serve -r` refuse with `PermissionError`), never fall through to a hidden account (#90), and clamp `message_ids` to `MAX_WRITE_BATCH = 10`. `move_email` evicts the stale index row for the source mailbox as soon as Mail.app confirms the move, so an immediate `search()` cannot return a ghost; the watcher re-indexes the message in its new mailbox (#66, optimistic update). CLI twins: `apple-mail-mcp mark`, `move`, `send`.
 
 ### Performance
@@ -20,12 +33,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Faster CI scheduling.** Run mocked tests on Linux for Python 3.11–3.13,
+  retaining one macOS Python 3.13 compatibility job on pushes to main.
+  Test jobs have a ten-minute execution timeout.
+
 - **Developer workflow overhaul** — `justfile` task runner (`just check` is the local mirror of CI), targeted `just test-changed`, opt-in git hooks (`just hooks`: staged-file ruff on commit, changed-file tests on push), `scripts/release.sh` collapsing the 4-step release checklist, `scripts/smoke.sh` for real-Mail.app verification, Claude Code project settings + skills (`.claude/`) and an `AGENTS.md` mirror for Codex. Test suite wall time drops from ~280s to ~3s: nine `test_manager.py` tests were walking the developer's real `~/Library/Mail`; a conftest guard now keeps the whole suite off it. `tests/` is in the ruff lint scope. New `tests/test_release_metadata.py` fails the build when `pyproject.toml`/`server.json` versions diverge, when the `CHANGELOG.md` lacks a section for the current version, or when the tool roster in `server.py` drifts from the counts and tables in README/CLAUDE.md/docs.
 - **Type checking is a gate.** `ty` (pinned in the dev group) runs in `just check` and CI after ruff; the 27 pre-existing diagnostics are fixed. `fastmcp` is bumped from `3.0.0b1` to `>=3.4.7` — the beta typed `@mcp.tool` as returning a `FunctionTool`, which made every direct call of a tool (the CLI, the deprecated `get_attachment` alias) a type error; 3.4 returns the decorated function. The CLI `--scope`/`--filter` options are now `Literal` types, so an invalid value is rejected at parse time with the list of choices instead of reaching the server.
 
 ### Fixed
 
+- **Release packaging stays in sync.** `just release` now validates and
+  updates the plugin, marketplace plugin entry, and Claude Desktop bundle
+  versions alongside Python/MCP metadata and the lockfile. It commits all
+  version files and leaves the marketplace's independent metadata version
+  unchanged. Version mismatches fail before any file is rewritten; regression
+  tests exercise the release commit and bundle filename in temporary repos.
+
 - **`date_received` from the `.emlx` plist footer was never used.** The fallback for a message whose headers carry no `Date` referenced `datetime.UTC` on the *class* (the constant lives on the module), raised `AttributeError` inside a best-effort `except Exception`, and silently left `date_received` empty. Surfaced by the type checker. (`index/disk.py`)
+
+## [0.5.0] - 2026-09-12
+
+### Added
+
+- **Claude Code plugin and Claude Desktop bundle.** Two new install surfaces, both thin launchers around the released PyPI package rather than vendored copies: the repo doubles as a Claude Code plugin marketplace (`claude plugin marketplace add imdinu/apple-mail-mcp` then `claude plugin install apple-mail@imdinu`), and every GitHub Release now carries an `apple-mail-mcp-<version>.mcpb` that Claude Desktop installs with a double-click. The shared launcher (`plugin/start.sh`) resolves uvx → pipx → a private venv, and prepends the Homebrew and `~/.local/bin` paths that GUI-launched MCP hosts omit from their environment — the usual cause of "works in Terminal, fails in Desktop". Both surfaces share the same index as a manual install. (#114)
+
+### Fixed
+
+- **A denied disk read is reported as a permission problem, not a missing item.** Without Full Disk Access on the process running the server, `get_emails()` failed outright instead of cascading to its JXA fallback, `get_email_attachment()` reported an attachment that `get_email()` had just listed as "not found", and `get_email_links()` reported an email had no links. Root cause across all three: `PermissionError` is a sibling of `FileNotFoundError` under `OSError`, and the handlers written for "file missing" let a TCC denial walk past — on macOS, `stat()` on a protected file succeeds and only the read fails, which made this look like a data bug. `get_emails()` cascades again, and the attachment and link paths raise an actionable message naming Full Disk Access for the process that launches the server. `Path.exists()` pre-checks, which return `False` on `EACCES`, are replaced with `stat()` throughout `disk.py`. Diagnosis by matwhiting; `get_emails` fix by kznmd. (#109, #113, #126)
+- **`search()` on an excluded account no longer has a distinguishable response shape.** An account hidden via `APPLE_MAIL_INDEX_EXCLUDE_ACCOUNTS` returned a bare `[]` where any other name — existing or not — got the `{"result": [], "hint": ...}` payload, and on index-required paths (`body`/`attachments` scopes, date filters, no index built) it returned `[]` where every other name raised. Both differences worked as an oracle: probe `search()` with candidate account names and the odd one out is a name the user deliberately hid. An excluded account now produces exactly the response a name that matches nothing would produce in the same state — same hints, same errors — while the backends still never touch it. The JXA-fallback guard for "every account is excluded" is aligned to the same shape. (#90)
+- **A server started before its index exists now participates in single-writer locking.** `serve` only acquired the index writer lock when an index was already present, so a no-index server kept full index-writer status with no lock held — and its opportunistic writes (stale-entry cleanup, parse-failure records) could create a brand-new empty database file concurrently with an `apple-mail-mcp index` build that legitimately held the lock. The lock is now acquired unconditionally: a no-index server that loses it runs index-passive (it cannot create a competing database) and promotes automatically when the lock frees. (#106)
 - **`search()` no longer reports an unusable index as an empty mailbox.** A missing index, an index containing 0 emails, and a genuine zero-match all returned the same `{"result": [], "hint": ...}` payload, and the hint suggested trying different keywords. That is good advice for a real no-match (#99) and actively misleading otherwise: it tells the calling model its vocabulary was wrong, so it rephrases and retries instead of diagnosing, and every retry produces the same empty result and the same hint. One user lost roughly four months of silently empty searches over an 18,232-message mailbox this way — `apple-mail-mcp status` would have said "no index" the whole time, but nothing on the search path ever looked. The zero-match hint is unchanged; the other two states now name the index path, the `apple-mail-mcp index` command, and the Full Disk Access prerequisite. Scopes that only the index can serve (`body`, `attachments`, and any `before`/`after` filter) raise with the same guidance rather than returning empty — `scope="body"` previously fell through to the JXA fallback, which searches subject and sender, and returned those matches labelled `matched_in: "body"`. An index that exists but cannot be opened now reports the access problem and its path instead of a bare "Search index error". (#110)
 - **A background sync that cannot read your mail no longer reports "Index up to date".** `sync_updates()` catches a `PermissionError` from the Mail directory and returns 0 changes, which is indistinguishable from a clean sync — so a server whose launching process lacks Full Disk Access printed the healthy message on every startup while the index froze at its last good state. The manager now records *why* a sync returned nothing, and `serve` prints a one-time warning naming Full Disk Access (or a missing Mail directory) instead. Starting the server with no index at all also says so, rather than starting silently. The docs claimed the server "does not need Full Disk Access" — true for serving an existing index, not for keeping one current; corrected. (#110)
 
@@ -33,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Single index writer across concurrent server instances (#106)** — Claude Desktop spawns every MCP server twice, so two processes ran disk reconciliation and a file watcher against the same `index.db` and reverted each other's writes in a ping-pong loop. `serve` now try-acquires an advisory `flock` (`IndexLock`, `index/lock.py`) on `index.db.lock` before its background sync; the loser runs index-passive (`IndexManager.index_writer = False` gates all index writes) and retries every `APPLE_MAIL_LOCK_RETRY_SECONDS` (default 180, `[server] lock_retry_seconds`), promoting to writer when the holder exits. CLI `index`/`rebuild` block up to 30s for the same lock, then fail with instructions. The lock is per-database and orthogonal to `read_only`, which gates JXA mail mutations. (#108)
+- **Concurrent `--watch` instances no longer fight over the index.** Claude Desktop spawns every MCP server twice, and two instances running reconciliation plus a file watcher against the same database treated each other's writes as drift and reverted them in a ping-pong loop — 74 MB of WAL growth in 13 minutes and FTS queries blocked for minutes on the reporter's machine. `serve` now takes an advisory `flock` on `index.db.lock` before its background sync: the winner is the sole index writer, and every other instance runs index-passive (mail tools unaffected, no sync or watcher) while retrying the lock every `lock_retry_seconds` (default 180, env `APPLE_MAIL_LOCK_RETRY_SECONDS` / `[server] lock_retry_seconds`). The kernel releases the lock if the writer exits or crashes, so a survivor promotes automatically — no stale-lockfile cleanup. CLI `index` and `rebuild` wait up to 30s for the lock, then fail with instructions instead of racing a running server. The lock is per-database and independent of `read_only`, which gates JXA mail mutations. (#106, #108)
 
 ## [0.4.2] - 2026-07-02
 

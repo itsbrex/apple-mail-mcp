@@ -19,6 +19,32 @@ The only Apple Mail MCP server with **full-coverage body search** — reliable o
 
 ## Quick Start
 
+**Using this fork:** the plugin, bundle, and PyPI installs below run the
+upstream release. Fork-only write tools and the development launcher require
+[this checkout's development setup](#development). Use the absolute launcher
+path from `just dev-status` in your MCP client.
+
+### Claude Code (plugin)
+
+```bash
+claude plugin marketplace add imdinu/apple-mail-mcp
+claude plugin install apple-mail@imdinu
+```
+
+### Claude Desktop (one-click bundle)
+
+Download `apple-mail-mcp-<version>.mcpb` from the
+[latest release](https://github.com/imdinu/apple-mail-mcp/releases/latest)
+and double-click it.
+
+Both the plugin and the bundle run the released PyPI package via a thin
+launcher (uvx → pipx → private venv, whichever is available) — no
+vendored code, identical behavior to a manual install. They start the
+server with `--watch`; grant Full Disk Access to the launching app
+(Claude Code / Claude Desktop) so the index stays fresh.
+
+### Any MCP client
+
 ```bash
 pipx install apple-mail-mcp
 ```
@@ -134,9 +160,9 @@ apple-mail-mcp integrate claude > ~/.claude/skills/apple-mail.md
 ## Development
 
 ```bash
-git clone https://github.com/imdinu/apple-mail-mcp
+git clone https://github.com/itsbrex/apple-mail-mcp
 cd apple-mail-mcp
-just setup   # uv sync + git hooks
+just setup   # locked deps + git hooks + global dev command
 just check   # lint + format + types + tests (~6s, same as CI)
 ```
 
