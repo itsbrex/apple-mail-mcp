@@ -32,11 +32,11 @@ jobs:
       - run: uv run --frozen ruff format --check src/ tests/
       - run: uv run --frozen ty check src/
 
-  # macOS runner: the project is macOS-only, and the whole suite runs
-  # without Mail.app present (JXA is mocked; the real ~/Library/Mail is
-  # stubbed out by tests/conftest.py).
+  # JXA and the real Mail directory are mocked, so test Python versions
+  # on Linux without waiting for three macOS runners.
   test:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -50,4 +50,18 @@ jobs:
       - run: uv sync --frozen --group dev
       # --durations surfaces any test that starts walking real disk
       # again (the suite is ~3s; one slow test stands out immediately).
+      - run: uv run --frozen pytest -q --durations=5 --durations-min=1.0
+
+  # Keep native-platform compatibility coverage on main after merging.
+  macos:
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen --group dev
       - run: uv run --frozen pytest -q --durations=5 --durations-min=1.0

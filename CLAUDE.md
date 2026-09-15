@@ -486,7 +486,7 @@ apple-mail-mcp integrate claude  # Generate a Claude Code skill file
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `lint.yml` | Push/PR to `main` | `ruff check` + `ruff format --check` on `src/ tests/`; pytest on macOS × Python 3.11/3.12/3.13. Mirrored locally by `just check`. |
+| `lint.yml` | Push/PR to `main` | `ruff check` + `ruff format --check` on `src/ tests/`; pytest on Linux × Python 3.11/3.12/3.13; one macOS 3.13 run on main. Mirrored locally by `just check`. |
 | `release.yml` | Tag push (`v*`) | `uv build` → PyPI publish → GitHub Release → MCP registry |
 | `docs.yml` | Push to `main` touching `docs/**` | zensical build → GitHub Pages |
 
