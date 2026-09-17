@@ -9,6 +9,152 @@
 const Mail = Application("Mail");
 
 const MailCore = {
+    /** Read one message's recipients with two batched property fetches. */
+    getRecipients(message, property) {
+        const recipients = message[property];
+        const names = recipients.name();
+        const addresses = recipients.address();
+        return addresses.map((address, i) => ({
+            name: names[i] || "",
+            address: address || "",
+        }));
+    },
+
+    /** Mail can silently substitute its default sender; fail before sending. */
+    assertSenderAccount(message, account) {
+        const sender = MailCore.senderAddress(message.sender());
+        const aliases = account.emailAddresses().map(a => a.toLowerCase());
+        if (aliases.indexOf(sender) === -1) {
+            throw new Error("Mail.app selected a different sender; check account settings before retrying.");
+        }
+    },
+
+    senderAddress(sender) {
+        const match = sender.match(/<([^<>]+)>\s*$/);
+        return (match ? match[1] : sender).trim().toLowerCase();
+    },
+
+    normalizeBody(body) {
+        // Mail's MIME conversion adds enclosing blank lines and whitespace.
+        return body.replace(/\r\n?/g, "\n")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/^\n+/, "").replace(/\s+$/, "");
+    },
+
+    /** Mail 16 ignores JXA reply.content assignment. Use its native setter.
+     * The script is constant: all caller data travels in typed descriptors,
+     * never interpolated AppleScript source, command arguments, or a file.
+     */
+    setReplyBody(message, body, fallbackQuote) {
+        ObjC.import("Foundation");
+        const expected = body + "\n\n" + fallbackQuote;
+        // Reading an uninitialized reply's rich text before setting it leaves
+        // Mail 16 returning stale empty content. Reappend the source explicitly.
+        const source = `on fillReply(outgoingId, expectedSubject, newContent)
+    tell application "Mail"
+        set replyMessage to outgoing message id outgoingId
+        if subject of replyMessage is not expectedSubject then error "Reply identity changed"
+        set content of replyMessage to newContent
+        set visible of replyMessage to false
+        return content of replyMessage as text
+    end tell
+end fillReply`;
+        const script = $.NSAppleScript.alloc.initWithSource(source);
+        // ascr/psbr invokes a local AppleScript handler; snam names it and
+        // ---- contains its positional arguments. Use a real target descriptor
+        // (a null target crashes the JXA Objective-C bridge on macOS 26).
+        const event = $.NSAppleEventDescriptor
+            .appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(
+                0x61736372, 0x70736272,
+                $.NSAppleEventDescriptor.currentProcessDescriptor, -1, 0
+            );
+        event.setParamDescriptorForKeyword(
+            $.NSAppleEventDescriptor.descriptorWithString("fillreply"),
+            0x736e616d
+        );
+        const args = $.NSAppleEventDescriptor.listDescriptor;
+        args.insertDescriptorAtIndex(
+            $.NSAppleEventDescriptor.descriptorWithInt32(message.id()), 1
+        );
+        [message.subject(), expected].forEach((value, i) => {
+            args.insertDescriptorAtIndex(
+                $.NSAppleEventDescriptor.descriptorWithString(value), i + 2
+            );
+        });
+        event.setParamDescriptorForKeyword(args, 0x2d2d2d2d);
+        const error = Ref();
+        const result = script.executeAppleEventError(event, error);
+        if (!result) {
+            throw new Error("Mail.app could not set the reply body; nothing was sent. Check Drafts before retrying.");
+        }
+        const actual = ObjC.unwrap(result.stringValue);
+        if (MailCore.normalizeBody(actual) !== MailCore.normalizeBody(expected)) {
+            throw new Error("Mail.app did not apply the reply body; nothing was sent. Check Drafts before retrying.");
+        }
+    },
+
+    /** Snapshot the scoped Drafts IDs before composing, never outgoing IDs. */
+    snapshotDrafts(account) {
+        try {
+            const mailbox = MailCore.getMailbox(account, "Drafts");
+            return {mailbox: mailbox, ids: mailbox.messages.id(), account: account.name()};
+        } catch (_) {
+            return null;
+        }
+    },
+
+    /** Read back one new, matching saved draft. Ambiguity is not a handle. */
+    findSavedDraft(snapshot, message, inReplyTo) {
+        const unknown = {reference: null, threaded: "unconfirmed"};
+        if (!snapshot) return unknown;
+        try {
+            const subject = message.subject();
+            const body = message.content();
+            const sender = MailCore.senderAddress(message.sender());
+            const addresses = (msg, prop) => MailCore.getRecipients(msg, prop)
+                .map(r => r.address.toLowerCase()).sort().join("\n");
+            const props = ["toRecipients", "ccRecipients", "bccRecipients"];
+            const expected = props.map(prop => addresses(message, prop));
+            for (let attempt = 0; attempt < 10; attempt++) {
+                const ids = snapshot.mailbox.messages.whose({subject: subject}).id()
+                    .filter(id => snapshot.ids.indexOf(id) === -1);
+                if (ids.length > 1) return unknown;
+                if (ids.length === 1) {
+                    const id = ids[0];
+                    if (!Number.isInteger(id) || id <= 0) return unknown;
+                    const saved = snapshot.mailbox.messages.byId(id);
+                    if (MailCore.normalizeBody(saved.content()) !== MailCore.normalizeBody(body) ||
+                        MailCore.senderAddress(saved.sender()) !== sender ||
+                        props.some((prop, i) => addresses(saved, prop) !== expected[i])) {
+                        return unknown;
+                    }
+                    const reference = {
+                        account: snapshot.account,
+                        mailbox: snapshot.mailbox.name(),
+                        message_id: id,
+                    };
+                    let threaded = "unconfirmed";
+                    if (inReplyTo) {
+                        // Ignore body text; unfold only the MIME header block.
+                        try {
+                            const headers = saved.source().split(/\r?\n\r?\n/, 1)[0]
+                                .replace(/\r?\n[ \t]+/g, " ");
+                            const match = headers.match(/^In-Reply-To:\s*(.+)$/mi);
+                            const parent = inReplyTo.replace(/^<|>$/g, "");
+                            threaded = !!match && match[1].split(/\s+/)
+                                .some(value => value.replace(/^<|>$/g, "") === parent);
+                        } catch (_) {}
+                    }
+                    return {reference: reference, threaded: threaded};
+                }
+                if (attempt < 9) delay(0.2);
+            }
+        } catch (_) {
+            // save() already happened. Never turn readback failure into a retry.
+        }
+        return unknown;
+    },
+
     /**
      * Get an account by name, or the first account if name is null/empty.
      * @param {string|null} name - Account name or null for default

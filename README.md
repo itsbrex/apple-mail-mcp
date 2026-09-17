@@ -13,7 +13,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![CI](https://github.com/imdinu/apple-mail-mcp/actions/workflows/lint.yml/badge.svg)](https://github.com/imdinu/apple-mail-mcp/actions/workflows/lint.yml)
 
-The only Apple Mail MCP server with **full-coverage body search** — reliable on large mailboxes where AppleScript-based servers timeout. 11 tools for reading, searching, extracting, and — opt-in — updating, moving, and sending email.
+The only Apple Mail MCP server with **full-coverage body search** — reliable on large mailboxes where AppleScript-based servers timeout. 14 tools for reading, searching, extracting, and — opt-in — updating, moving, and sending email.
 
 **[Read the docs](https://imdinu.github.io/apple-mail-mcp/)** for the full guide.
 
@@ -97,6 +97,15 @@ for the full schema and precedence rules.
 | `update_email_status(message_ids, read?, flagged?)` | Mark read/unread, flag/unflag (≤10 ids) |
 | `move_email(message_ids, target_mailbox)` | Move — Archive, Trash, or any folder (≤10 ids) |
 | `send_email(to, subject, body, cc?, bcc?, confirm?)` | Draft by default; `confirm=True` sends |
+| `create_draft(to, subject, body, cc?, bcc?, account?)` | Save an unsent draft; no send option |
+| `reply_email(message_id, body, account?, mailbox?, reply_all?, confirm?)` | Native reply; draft by default, send only on confirmation |
+| `reply_draft(message_id, body, account?, mailbox?, reply_all?)` | Native reply draft; no send option |
+
+Compose recipients accept `Name <address>`; quote names containing commas.
+`create_draft` and `reply_draft` are the preferred draft-only entry points.
+Draft results include a scoped saved-message reference when readback succeeds;
+otherwise `draft_status` is `unconfirmed`. Repeated calls create new drafts.
+`get_email` includes structured `to` and `cc` recipients.
 
 ## Performance
 
@@ -148,6 +157,9 @@ apple-mail-mcp mailboxes --account Work
 apple-mail-mcp extract 12345 invoice.pdf
 apple-mail-mcp mark 12345 --read --flag            # write tools: off with --read-only
 apple-mail-mcp move 12345 --to Archive
+apple-mail-mcp draft --to a@example.com -s "Hi" -b "…" # always a draft
+apple-mail-mcp reply-draft 123 -a Work -m Archive -b "…" --reply-all
+apple-mail-mcp reply 123 -a Work -m Archive -b "…" # add --confirm to send
 apple-mail-mcp send --to a@example.com -s "Hi" -b "…" # draft; add --confirm to send
 ```
 

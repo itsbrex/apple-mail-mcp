@@ -8,7 +8,7 @@ Apple Mail MCP uses a **4-layer hybrid access pattern** — disk-first reads for
 src/apple_mail_mcp/
 ├── __init__.py         # CLI entry point, exports main()
 ├── cli.py              # CLI commands (index, status, rebuild, serve)
-├── server.py           # FastMCP server with 11 MCP tools + 1 resource
+├── server.py           # FastMCP server with 14 MCP tools + 1 resource
 ├── config.py           # Layered config: CLI > env > config.toml > defaults
 ├── builders.py         # QueryBuilder, AccountsQueryBuilder
 ├── executor.py         # run_jxa(), execute_with_core(), execute_query()
@@ -42,7 +42,7 @@ src/apple_mail_mcp/
 
 ### 1. MCP Tools (`server.py`)
 
-The 11 MCP tools are the public API. Each tool resolves defaults, picks the right access method, and returns typed results.
+The 14 MCP tools are the public API. Each tool resolves defaults, picks the right access method, and returns typed results.
 
 ### 2. MCP Resources (`server.py`)
 
@@ -138,7 +138,7 @@ Strategy 2: Index lookup + JXA   ← finds mailbox via SQLite, then JXA
 Strategy 3: Iterate all mailboxes ← slowest, always works (with timeout)
 ```
 
-All strategies return an identical response schema. Strategy 0 extracts read/flagged status from the plist footer flags bitmask (bit 0 = read, bit 4 = flagged) and `date_sent`, `reply_to`, `message_id` from MIME headers.
+All strategies return an identical response schema. Strategy 0 extracts read/flagged status from the plist footer flags bitmask (bit 0 = read, bit 4 = flagged) and `date_sent`, `reply_to`, `message_id` and structured `to`/`cc` recipients from MIME headers.
 
 ---
 

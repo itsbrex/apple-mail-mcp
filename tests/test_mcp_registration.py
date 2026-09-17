@@ -68,3 +68,40 @@ async def test_real_server_registers_every_tool_and_resource():
     assert _decorated("resource") == {"index_status"}
     # Cached: a second access must not rebuild (would double-register).
     assert server.mcp.server is real
+
+
+@pytest.mark.asyncio
+async def test_every_tool_exposes_accurate_mail_mutation_hints():
+    from apple_mail_mcp import server
+
+    writes = {
+        "update_email_status": (False, True),
+        "move_email": (False, False),
+        "send_email": (True, False),
+        "create_draft": (False, False),
+        "reply_email": (True, False),
+        "reply_draft": (False, False),
+    }
+    for tool in await server.mcp.server.list_tools():
+        hints = tool.annotations
+        assert hints is not None, tool.name
+        assert hints.readOnlyHint is (tool.name not in writes), tool.name
+        destructive, idempotent = writes.get(tool.name, (False, True))
+        assert hints.destructiveHint is destructive, tool.name
+        assert hints.idempotentHint is idempotent, tool.name
+        assert hints.openWorldHint is True, tool.name
+
+    tree = ast.parse(SERVER_PY.read_text())
+    guarded = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name in _decorated("tool")
+        and any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_ensure_writable"
+            for call in ast.walk(node)
+        )
+    }
+    assert guarded == set(writes)

@@ -1069,7 +1069,9 @@ def cli_send(
     body: Annotated[
         str,
         cyclopts.Parameter(
-            name=["--body", "-b"], help="Plain-text body ('-' reads stdin)"
+            name=["--body", "-b"],
+            help="Plain-text body ('-' reads stdin)",
+            allow_leading_hyphen=True,
         ),
     ],
     cc: Annotated[
@@ -1110,6 +1112,163 @@ def cli_send(
                 bcc=bcc,
                 account=account,
                 confirm=confirm,
+            )
+        )
+        _print_json(result)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+@app.command(name="draft")
+def cli_draft(
+    to: Annotated[
+        list[str],
+        cyclopts.Parameter(name=["--to"], help="Recipient (repeatable)"),
+    ],
+    subject: Annotated[
+        str,
+        cyclopts.Parameter(name=["--subject", "-s"], help="Subject line"),
+    ],
+    body: Annotated[
+        str,
+        cyclopts.Parameter(
+            name=["--body", "-b"],
+            help="Plain-text body ('-' reads stdin)",
+            allow_leading_hyphen=True,
+        ),
+    ],
+    cc: Annotated[
+        list[str] | None,
+        cyclopts.Parameter(name=["--cc"], help="CC (repeatable)"),
+    ] = None,
+    bcc: Annotated[
+        list[str] | None,
+        cyclopts.Parameter(name=["--bcc"], help="BCC (repeatable)"),
+    ] = None,
+    account: Annotated[
+        str | None,
+        cyclopts.Parameter(
+            name=["--account", "-a"], help="Account to send from"
+        ),
+    ] = None,
+) -> None:
+    """Save an unsent draft with no send capability (JSON)."""
+    from .server import create_draft
+
+    if body == "-":
+        body = sys.stdin.read()
+
+    try:
+        result = _run_async(
+            create_draft(
+                to,
+                subject,
+                body,
+                cc=cc,
+                bcc=bcc,
+                account=account,
+            )
+        )
+        _print_json(result)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+@app.command(name="reply")
+def cli_reply(
+    message_id: int,
+    body: Annotated[
+        str,
+        cyclopts.Parameter(
+            name=["--body", "-b"],
+            help="Plain-text reply ('-' reads stdin)",
+            allow_leading_hyphen=True,
+        ),
+    ],
+    account: Annotated[
+        str | None,
+        cyclopts.Parameter(name=["--account", "-a"], help="Source account"),
+    ] = None,
+    mailbox: Annotated[
+        str | None,
+        cyclopts.Parameter(name=["--mailbox", "-m"], help="Source mailbox"),
+    ] = None,
+    reply_all: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name=["--reply-all"], help="Reply to all recipients"
+        ),
+    ] = False,
+    confirm: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name=["--confirm"], help="Send the newly composed reply"
+        ),
+    ] = False,
+) -> None:
+    """Create a native reply: draft by default, send with --confirm (JSON)."""
+    from .server import reply_email
+
+    if body == "-":
+        body = sys.stdin.read()
+    try:
+        result = _run_async(
+            reply_email(
+                message_id,
+                body,
+                account=account,
+                mailbox=mailbox,
+                reply_all=reply_all,
+                confirm=confirm,
+            )
+        )
+        _print_json(result)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+@app.command(name="reply-draft")
+def cli_reply_draft(
+    message_id: int,
+    body: Annotated[
+        str,
+        cyclopts.Parameter(
+            name=["--body", "-b"],
+            help="Plain-text reply ('-' reads stdin)",
+            allow_leading_hyphen=True,
+        ),
+    ],
+    account: Annotated[
+        str | None,
+        cyclopts.Parameter(name=["--account", "-a"], help="Source account"),
+    ] = None,
+    mailbox: Annotated[
+        str | None,
+        cyclopts.Parameter(name=["--mailbox", "-m"], help="Source mailbox"),
+    ] = None,
+    reply_all: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name=["--reply-all"], help="Reply to all recipients"
+        ),
+    ] = False,
+) -> None:
+    """Save a native reply draft with no send capability (JSON)."""
+    from .server import reply_draft
+
+    if body == "-":
+        body = sys.stdin.read()
+    try:
+        result = _run_async(
+            reply_draft(
+                message_id,
+                body,
+                account=account,
+                mailbox=mailbox,
+                reply_all=reply_all,
             )
         )
         _print_json(result)

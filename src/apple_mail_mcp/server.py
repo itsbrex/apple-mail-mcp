@@ -6,7 +6,7 @@ Apple Mail MCP Server
 2. FTS5 search — full-text body search in ~2ms with BM25 ranking
 3. JXA fallback — batch property fetching for multi-email listing
 
-TOOLS (11 total):
+TOOLS (14 total):
 - list_accounts() - List email accounts
 - list_mailboxes(account?) - List mailboxes
 - get_emails(..., filter?) - Unified email listing with filters
@@ -18,8 +18,11 @@ TOOLS (11 total):
 - update_email_status(ids, read?, flagged?) - Mark read/unread, flag/unflag
 - move_email(ids, target_mailbox) - Move / archive / trash
 - send_email(to, subject, body, ..., confirm?) - Draft; send on confirm
+- create_draft(to, subject, body, ...) - Save an unsent draft
+- reply_email(id, body, ..., confirm?) - Native reply; send on confirm
+- reply_draft(id, body, ...) - Save a native reply draft
 
-Write tools (the last three) refuse in read-only mode (#80), never
+Write tools refuse in read-only mode (#80), never
 target a hidden account (#90), and return the resulting state.
 
 RESOURCES (1 total):
@@ -39,6 +42,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
+from email.headerregistry import AddressHeader, HeaderRegistry
 from pathlib import Path as _Path
 from typing import Any, Literal, TypeVar, cast
 
@@ -49,7 +53,7 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import TypedDict
 
-from .builders import AccountsQueryBuilder, QueryBuilder
+from .builders import AccountsQueryBuilder, QueryBuilder, recipient_fields_js
 from .config import (
     get_default_account,
     get_default_mailbox,
@@ -81,13 +85,16 @@ class _LazyFastMCP:
 
     def __init__(self, name: str) -> None:
         self._name = name
-        self._tools: list[Callable[..., Any]] = []
+        self._tools: list[tuple[dict[str, Any], Callable[..., Any]]] = []
         self._resources: list[tuple[dict[str, Any], Callable[..., Any]]] = []
         self._server: Any = None
 
-    def tool(self, fn: F) -> F:
-        self._tools.append(fn)
-        return fn
+    def tool(self, *, annotations: dict[str, bool]) -> Callable[[F], F]:
+        def register(fn: F) -> F:
+            self._tools.append(({"annotations": annotations}, fn))
+            return fn
+
+        return register
 
     def resource(self, uri: str, **kwargs: Any) -> Callable[[F], F]:
         def register(fn: F) -> F:
@@ -103,8 +110,8 @@ class _LazyFastMCP:
             from fastmcp import FastMCP
 
             server = FastMCP(self._name)
-            for fn in self._tools:
-                server.tool(fn)
+            for kwargs, fn in self._tools:
+                server.tool(**kwargs)(fn)
             for kwargs, fn in self._resources:
                 server.resource(**kwargs)(fn)
             self._server = server
@@ -264,6 +271,13 @@ class AttachmentSummary(TypedDict):
     size: int
 
 
+class Recipient(TypedDict):
+    """A recipient name and bare email address."""
+
+    name: str
+    address: str
+
+
 class EmailFull(TypedDict, total=False):
     """Complete email with full content."""
 
@@ -277,6 +291,8 @@ class EmailFull(TypedDict, total=False):
     flagged: bool
     reply_to: str
     message_id: str
+    to: list[Recipient]
+    cc: list[Recipient]
     attachments: list[AttachmentSummary]
 
 
@@ -512,7 +528,14 @@ def _detect_matched_columns(query: str, result) -> str:
 # ========== MCP Tools (11 total; write tools further down) ==========
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def list_accounts() -> list[Account]:
     """
     List all configured email accounts in Apple Mail.
@@ -544,7 +567,14 @@ async def list_accounts() -> list[Account]:
     return [a for a in accounts if a.get("name") not in excluded]
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def list_mailboxes(account: str | None = None) -> list[Mailbox]:
     """
     List all mailboxes for an email account.
@@ -572,7 +602,14 @@ async def list_mailboxes(account: str | None = None) -> list[Mailbox]:
     return await execute_with_core_async(script)
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def get_emails(
     account: str | None = None,
     mailbox: str | None = None,
@@ -797,12 +834,20 @@ JSON.stringify({{
     flagged: msg.flaggedStatus(),
     reply_to: msg.replyTo(),
     message_id: msg.messageId(),
+{recipient_fields_js()}
     attachments: attachments
 }});
 """
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def get_email(
     message_id: int,
     account: str | None = None,
@@ -826,6 +871,7 @@ async def get_email(
         - content: Full plain text body
         - read, flagged status
         - reply_to, message_id (email Message-ID header)
+        - to, cc: Lists of {name, address} recipients
         - attachments: List of {filename, mime_type, size}
 
     Note:
@@ -920,6 +966,8 @@ async def get_email(
                             else False,
                             "reply_to": parsed.reply_to,
                             "message_id": parsed.message_id_header,
+                            "to": parsed.to,
+                            "cc": parsed.cc,
                             "attachments": [
                                 {
                                     "filename": a.filename,
@@ -1126,7 +1174,14 @@ async def _resolve_emlx_path(
     return emlx_path
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def get_email_links(
     message_id: int,
     account: str | None = None,
@@ -1168,7 +1223,14 @@ async def get_email_links(
     }
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def get_email_attachment(
     message_id: int,
     filename: str,
@@ -1246,7 +1308,14 @@ async def get_email_attachment(
     }
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def get_attachment(
     message_id: int,
     filename: str | None = None,
@@ -1272,7 +1341,14 @@ async def get_attachment(
     return await get_email_attachment(message_id, filename, account, mailbox)
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def search(
     query: str,
     account: str | None = None,
@@ -1595,6 +1671,14 @@ class MoveResult(TypedDict):
     mailbox: str
 
 
+class DraftReference(TypedDict):
+    """A saved email locator, never an outgoing-message ID."""
+
+    account: str
+    mailbox: str
+    message_id: int
+
+
 class SendResult(TypedDict):
     """Outcome of send_email: a saved draft, or a sent message."""
 
@@ -1604,9 +1688,26 @@ class SendResult(TypedDict):
     cc: list[str]
     bcc: list[str]
     subject: str
+    recipients: dict[str, list[Recipient]]
+    draft: DraftReference | None
+    draft_status: Literal["confirmed", "unconfirmed", "not_applicable"]
 
 
-@mcp.tool
+class ReplyResult(SendResult):
+    """Native reply outcome; threading is confirmed only by saved headers."""
+
+    in_reply_to: str
+    threaded: bool | Literal["unconfirmed"]
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
 async def update_email_status(
     message_ids: list[int],
     read: bool | None = None,
@@ -1744,7 +1845,14 @@ async def _evict_index_rows(
         )
 
 
-@mcp.tool
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
 async def move_email(
     message_ids: list[int],
     target_mailbox: str,
@@ -1909,7 +2017,66 @@ def _validate_addresses(field: str, addresses: list[str] | None) -> list[str]:
     return clean
 
 
-@mcp.tool
+def _parse_recipients(
+    field: str, addresses: list[str] | None
+) -> list[Recipient]:
+    """Accept one bare address or RFC display-name form per entry.
+
+    Parse names strictly; preserve the original bare-address restrictions.
+    In particular, a comma in a display name must be quoted.
+    """
+    if addresses is None:
+        return []
+    if not isinstance(addresses, list):
+        raise ValueError(f"{field} must be a list of addresses.")
+    recipients: list[Recipient] = []
+    for raw in addresses:
+        if not isinstance(raw, str):
+            raise ValueError(f"{field}: addresses must be strings.")
+        value = raw.strip()
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in raw):
+            raise ValueError(f"{field}: invalid address {raw!r}.")
+        if not value:
+            continue
+        name = ""
+        addr = value
+        if "<" in value or ">" in value:
+            try:
+                header = HeaderRegistry()("To", value)
+                if (
+                    not isinstance(header, AddressHeader)
+                    or header.defects
+                    or len(header.addresses) != 1
+                    or value.count("<") != 1
+                    or value.count(">") != 1
+                    or not value.endswith(">")
+                    or any(group.display_name for group in header.groups)
+                ):
+                    raise ValueError
+                name = header.addresses[0].display_name.strip()
+                addr = value.split("<", 1)[1][:-1].strip()
+                if any(
+                    c in "<>" or ord(c) < 0x20 or ord(c) == 0x7F for c in name
+                ):
+                    raise ValueError
+            except (ValueError, IndexError) as exc:
+                raise ValueError(
+                    f"{field}: invalid address {value!r}; quote names"
+                    " containing commas."
+                ) from exc
+        _validate_addresses(field, [addr])
+        recipients.append({"name": name, "address": addr})
+    return recipients
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
 async def send_email(
     to: list[str],
     subject: str,
@@ -1924,13 +2091,18 @@ async def send_email(
 
     Safety (#22): without ``confirm=True`` the message is saved to the
     account's Drafts mailbox (never transmitted, no compose window) and
-    the result says ``"status": "draft"``. Call again with
+    the result says ``"status": "draft"``. Prefer ``create_draft`` for
+    this path. A confirmed ``draft`` reference contains account, mailbox
+    and numeric Mail message ID. If readback is ambiguous or delayed,
+    ``draft`` is null and ``draft_status`` is "unconfirmed"; inspect
+    Drafts before retrying. Each call creates a new message. Call with
     ``confirm=True`` after the user has approved the content to
     actually send it. A server-stored Drafts folder (iCloud, Gmail)
     can take a few seconds to list the new draft.
 
     Args:
-        to: Recipient addresses (at least one).
+        to: Recipient addresses (at least one), bare or Name <address>.
+            Quote display names containing commas.
         subject: Subject line.
         body: Plain-text body.
         cc: CC addresses (optional).
@@ -1941,7 +2113,7 @@ async def send_email(
 
     Returns:
         ``{"status": "draft" | "sent", "account", "to", "cc", "bcc",
-        "subject"}``.
+        "subject", "recipients", "draft", "draft_status"}``.
 
     Example:
         >>> send_email(["a@example.com"], "Hi", "Body")  # draft
@@ -1949,14 +2121,77 @@ async def send_email(
     """
     _ensure_writable()
 
+    return await _compose_email(to, subject, body, cc, bcc, account, confirm)
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def create_draft(
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    account: str | None = None,
+) -> SendResult:
+    """Save an unsent draft, without a compose window or send capability.
+
+    Recipient strings accept bare addresses or ``Name <address>``. Quote
+    names containing commas. Draft creation changes mail and is blocked
+    in read-only mode. The watcher indexes it if Drafts is included.
+    Repeated calls create separate drafts; this is not idempotent.
+    """
+    _ensure_writable()
+    return await _compose_email(to, subject, body, cc, bcc, account, False)
+
+
+def _compose_action(confirm: bool, *, reply: bool = False) -> tuple[str, str]:
+    """The draft script cannot contain a transmission instruction."""
+    if confirm:
+        return "sent", (
+            "const ok = msg.send();\n"
+            "if (!ok)\n"
+            '    throw new Error("Mail.app refused to send the message");\n'
+            'const draftInfo = {reference: null, threaded: "unconfirmed"};'
+        )
+    parent = "inReplyTo" if reply else "null"
+    return "draft", (
+        "msg.save();\n"
+        "const draftInfo = MailCore.findSavedDraft("
+        f"beforeDrafts, msg, {parent});"
+    )
+
+
+async def _compose_email(
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    account: str | None,
+    confirm: bool,
+) -> SendResult:
     # Validation first: nothing below may run on malformed input.
     if not isinstance(subject, str):
         raise ValueError("subject must be a string.")
     if not isinstance(body, str):
         raise ValueError("body must be a string.")
-    to_clean = _validate_addresses("to", to)
-    cc_clean = _validate_addresses("cc", cc)
-    bcc_clean = _validate_addresses("bcc", bcc)
+    if not isinstance(confirm, bool):
+        raise ValueError("confirm must be a boolean.")
+    recipients = {
+        "to": _parse_recipients("to", to),
+        "cc": _parse_recipients("cc", cc),
+        "bcc": _parse_recipients("bcc", bcc),
+    }
+    to_clean = [r["address"] for r in recipients["to"]]
+    cc_clean = [r["address"] for r in recipients["cc"]]
+    bcc_clean = [r["address"] for r in recipients["bcc"]]
     if not to_clean:
         raise ValueError("to must contain at least one recipient address.")
     total = len(to_clean) + len(cc_clean) + len(bcc_clean)
@@ -1971,6 +2206,8 @@ async def send_email(
     if _hidden_account(account):
         raise ValueError(f"Account {account!r} not found.")
     resolved_account = await _resolve_visible_account(account)
+    if resolved_account is None and _excluded_account_names():
+        raise ValueError("No visible account available.")
 
     # The draft/send decision is made HERE, in Python: the draft script
     # contains no send() call at all, so no content or runtime state
@@ -1981,21 +2218,19 @@ async def send_email(
     # account's Drafts mailbox without a compose window popping up
     # (verified live on Mail 16.0 / macOS 26.6; for a server-stored
     # Drafts folder it can take a few seconds to show in the mailbox).
-    status: Literal["draft", "sent"]
-    if confirm:
-        status = "sent"
-        action = (
-            "const ok = msg.send();\n"
-            'if (!ok) throw new Error("Mail.app refused to send the message");'
-        )
-    else:
-        status = "draft"
-        action = "msg.save();"
+    status, action = _compose_action(confirm)
+    snapshot = (
+        "" if confirm else "const beforeDrafts = MailCore.snapshotDrafts(acct);"
+    )
     script = f"""
 const acct = MailCore.getAccount({json.dumps(resolved_account)});
+if (!acct.enabled()) {{
+    throw new Error("Account is disabled; no draft or send attempted.");
+}}
 const addr = acct.emailAddresses()[0];
 const fullName = acct.fullName();
 const sender = fullName ? fullName + " <" + addr + ">" : addr;
+{snapshot}
 const msg = Mail.OutgoingMessage({{
     subject: {json.dumps(subject)},
     content: {json.dumps(body)},
@@ -2003,15 +2238,19 @@ const msg = Mail.OutgoingMessage({{
     sender: sender,
 }});
 Mail.outgoingMessages.push(msg);
-for (const a of {json.dumps(to_clean)}) {{
-    msg.toRecipients.push(Mail.ToRecipient({{address: a}}));
+for (const a of {json.dumps(recipients["to"])}) {{
+    const props = a.name ? a : {{address: a.address}};
+    msg.toRecipients.push(Mail.ToRecipient(props));
 }}
-for (const a of {json.dumps(cc_clean)}) {{
-    msg.ccRecipients.push(Mail.CcRecipient({{address: a}}));
+for (const a of {json.dumps(recipients["cc"])}) {{
+    const props = a.name ? a : {{address: a.address}};
+    msg.ccRecipients.push(Mail.CcRecipient(props));
 }}
-for (const a of {json.dumps(bcc_clean)}) {{
-    msg.bccRecipients.push(Mail.BccRecipient({{address: a}}));
+for (const a of {json.dumps(recipients["bcc"])}) {{
+    const props = a.name ? a : {{address: a.address}};
+    msg.bccRecipients.push(Mail.BccRecipient(props));
 }}
+MailCore.assertSenderAccount(msg, acct);
 {action}
 JSON.stringify({{
     status: {json.dumps(status)},
@@ -2019,6 +2258,10 @@ JSON.stringify({{
     to: {json.dumps(to_clean)},
     cc: {json.dumps(cc_clean)},
     bcc: {json.dumps(bcc_clean)},
+    recipients: {json.dumps(recipients)},
+    draft: draftInfo.reference,
+    draft_status: {json.dumps("not_applicable") if confirm else "null"} ||
+        (draftInfo.reference ? "confirmed" : "unconfirmed"),
     subject: {json.dumps(subject)},
 }});
 """
@@ -2045,6 +2288,162 @@ JSON.stringify({{
             ) from None
         raise
     return cast(SendResult, result)
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def reply_email(
+    message_id: int,
+    body: str,
+    account: str | None = None,
+    mailbox: str | None = None,
+    reply_all: bool = False,
+    confirm: bool = False,
+) -> ReplyResult:
+    """Reply using Mail's native recipients and threading headers.
+
+    Saves a draft by default; confirm=True sends this newly composed reply.
+    Prefer reply_draft when no send capability is needed. message_id is a
+    numeric Mail ID scoped to account/mailbox (configured defaults when
+    omitted). The original is re-quoted as plain text after the supplied body.
+    This never searches other accounts or sends an existing draft.
+    threaded is true only when the saved In-Reply-To header was verified;
+    a send result cannot prove recipient delivery or threading. The watcher
+    indexes the new mail if its mailbox is included.
+    """
+    _ensure_writable()
+    return await _reply_email(
+        message_id, body, account, mailbox, reply_all, confirm
+    )
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def reply_draft(
+    message_id: int,
+    body: str,
+    account: str | None = None,
+    mailbox: str | None = None,
+    reply_all: bool = False,
+) -> ReplyResult:
+    """Save a native reply draft with no send capability.
+
+    Uses the scoped numeric Mail ID and re-quotes the original as plain text.
+    reply_all asks Mail to derive recipients, excluding the sender's own
+    addresses. Blocked in read-only mode. The watcher indexes the draft
+    only if its mailbox is included. Repeated calls create separate drafts.
+    """
+    _ensure_writable()
+    return await _reply_email(
+        message_id, body, account, mailbox, reply_all, False
+    )
+
+
+async def _reply_email(
+    message_id: int,
+    body: str,
+    account: str | None,
+    mailbox: str | None,
+    reply_all: bool,
+    confirm: bool,
+) -> ReplyResult:
+    if type(message_id) is not int or message_id <= 0:
+        raise ValueError("message_id must be a positive integer Mail ID.")
+    if not isinstance(body, str):
+        raise ValueError("body must be a string.")
+    if not isinstance(reply_all, bool) or not isinstance(confirm, bool):
+        raise ValueError("reply_all and confirm must be booleans.")
+    if _hidden_account(account):
+        raise ValueError(f"Message {message_id} not found.")
+    resolved_account = await _resolve_visible_account(account)
+    if resolved_account is None and _excluded_account_names():
+        raise ValueError(f"Message {message_id} not found.")
+    setup = build_mailbox_setup_js(
+        resolved_account,
+        _resolve_mailbox(mailbox),
+        account_var="acct",
+        mailbox_var="sourceMailbox",
+    )
+    status, action = _compose_action(confirm, reply=True)
+    snapshot = (
+        "" if confirm else "const beforeDrafts = MailCore.snapshotDrafts(acct);"
+    )
+    script = f"""
+{setup}
+if (!acct.enabled()) {{
+    throw new Error("Account is disabled; no reply attempted.");
+}}
+const targetId = {json.dumps(message_id)};
+const ids = sourceMailbox.messages.id();
+if (ids.indexOf(targetId) === -1) {{
+    throw new Error("Message not found with ID: " + targetId);
+}}
+const src = sourceMailbox.messages.byId(targetId);
+const inReplyTo = src.messageId() || "";
+{snapshot}
+const msg = src.reply({{openingWindow: false,
+    replyToAll: {json.dumps(reply_all)}}});
+const fallbackQuote = src.sender() + " wrote:\\n\\n> "
+    + src.content().replace(/\\r\\n?/g, "\\n").replace(/\\n/g, "\\n> ");
+MailCore.setReplyBody(msg, {json.dumps(body)}, fallbackQuote);
+const addr = acct.emailAddresses()[0];
+const fullName = acct.fullName();
+msg.sender = fullName ? fullName + " <" + addr + ">" : addr;
+MailCore.assertSenderAccount(msg, acct);
+const recipients = {{
+    to: MailCore.getRecipients(msg, "toRecipients"),
+    cc: MailCore.getRecipients(msg, "ccRecipients"),
+    bcc: MailCore.getRecipients(msg, "bccRecipients"),
+}};
+const total = recipients.to.length + recipients.cc.length
+    + recipients.bcc.length;
+if (total === 0 || total > {MAX_WRITE_BATCH}) {{
+    msg.close({{saving: "no"}});
+    throw new Error(total === 0 ? "Reply has no recipients"
+        : "Too many recipients for reply");
+}}
+const subject = msg.subject();
+{action}
+JSON.stringify({{
+    status: {json.dumps(status)},
+    account: acct.name(),
+    to: recipients.to.map(r => r.address),
+    cc: recipients.cc.map(r => r.address),
+    bcc: recipients.bcc.map(r => r.address),
+    recipients: recipients,
+    subject: subject,
+    in_reply_to: inReplyTo,
+    threaded: draftInfo.threaded,
+    draft: draftInfo.reference,
+    draft_status: {json.dumps("not_applicable") if confirm else "null"} ||
+        (draftInfo.reference ? "confirmed" : "unconfirmed"),
+}});
+"""
+    try:
+        return cast(ReplyResult, await execute_with_core_async(script))
+    except TimeoutError:
+        raise RuntimeError(
+            f"Mail.app did not respond while replying to {message_id};"
+            " check Sent and Drafts before retrying. A draft or send may"
+            " already have been queued."
+        ) from None
+    except Exception as exc:
+        error = str(exc).lower()
+        if "message not found with id" in error or "-1728" in error:
+            raise ValueError(f"Message {message_id} not found.") from None
+        raise
 
 
 @mcp.resource(

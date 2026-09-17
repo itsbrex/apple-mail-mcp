@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -130,3 +130,49 @@ async def test_strategy0_and_jxa_agree_on_ids(gmail_index, tmp_path):
         f"Fast path {s0_ids} and JXA path {s1_ids} disagree — "
         "the #103 divergence class has returned"
     )
+
+
+@pytest.mark.parametrize("jxa_strategy", [1, 2, 3])
+@pytest.mark.asyncio
+async def test_full_email_recipients_agree_across_strategies(
+    tmp_path, jxa_strategy
+):
+    from apple_mail_mcp import server
+
+    mime = (
+        b"From: sender@example.com\n"
+        b'To: "Doe, Jane" <jane@example.com>\n'
+        b"Cc: peer@example.com\n\nBody"
+    )
+    path = tmp_path / "42.emlx"
+    path.write_bytes(str(len(mime)).encode() + b"\n" + mime)
+    manager = MagicMock()
+    manager.has_index.return_value = True
+    manager.find_email_path.return_value = path
+    manager.get_email_attachments.return_value = []
+    AccountMap.get_instance().load_from_jxa([{"name": "Work", "id": "W"}])
+    with patch.object(server, "_get_index_manager", return_value=manager):
+        disk_result = await server.get_email(42, account="Work")
+
+    manager.find_email_path.return_value = None
+    manager.find_email_location.return_value = ("W", "Archive")
+    jxa_result = {
+        "id": 42,
+        "to": [{"name": "Doe, Jane", "address": "jane@example.com"}],
+        "cc": [{"name": "", "address": "peer@example.com"}],
+    }
+    responses = [RuntimeError("not found")] * (jxa_strategy - 1)
+    with (
+        patch.object(server, "_get_index_manager", return_value=manager),
+        patch.object(
+            server,
+            "execute_with_core_async",
+            new=AsyncMock(side_effect=[*responses, jxa_result]),
+        ) as jxa,
+    ):
+        result = await server.get_email(42, account="Work")
+    assert jxa.call_count == jxa_strategy
+    for field in ("to", "cc"):
+        assert result[field] == disk_result[field]
+        for call in jxa.call_args_list:
+            assert f"{field}: MailCore.getRecipients" in call.args[0]

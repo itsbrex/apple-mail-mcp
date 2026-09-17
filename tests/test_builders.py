@@ -15,8 +15,21 @@ import pytest
 from apple_mail_mcp.builders import (
     PROPERTY_SETS,
     AccountsQueryBuilder,
+    GetEmailBuilder,
     QueryBuilder,
 )
+
+
+def test_every_full_message_jxa_strategy_reads_structured_recipients():
+    from apple_mail_mcp.server import _build_get_email_script
+
+    scripts = [
+        _build_get_email_script(42, "const mailbox = fixture;"),
+        GetEmailBuilder(42, account="Work").build(),
+    ]
+    for script in scripts:
+        assert 'to: MailCore.getRecipients(msg, "toRecipients")' in script
+        assert 'cc: MailCore.getRecipients(msg, "ccRecipients")' in script
 
 
 class TestQueryBuilderFromMailbox:

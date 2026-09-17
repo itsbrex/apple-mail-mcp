@@ -10,7 +10,7 @@ The only Apple Mail MCP server with full-coverage FTS5 body search. Reliable on 
 src/apple_mail_mcp/
 ├── __init__.py         # CLI entry point, exports main()
 ├── cli.py              # CLI commands (index, status, rebuild, serve)
-├── server.py           # FastMCP server with 11 MCP tools
+├── server.py           # FastMCP server with 14 MCP tools
 ├── config.py           # Environment variable configuration
 ├── builders.py         # QueryBuilder, AccountsQueryBuilder
 ├── executor.py         # run_jxa(), execute_with_core(), execute_query()
@@ -30,7 +30,7 @@ src/apple_mail_mcp/
     └── mail_core.js    # Shared JXA utilities (MailCore object)
 ```
 
-## MCP Tools (11 total)
+## MCP Tools (14 total)
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
@@ -45,6 +45,9 @@ src/apple_mail_mcp/
 | `update_email_status(ids, read?, flagged?)` | **Write.** Mark read/unread, flag/unflag | message_ids (≤10), read, flagged, account, mailbox |
 | `move_email(ids, target_mailbox)` | **Write.** Move / archive / trash; evicts stale index row (#66) | message_ids (≤10), target_mailbox, account, mailbox |
 | `send_email(to, subject, body, ...)` | **Write.** Draft by default; `confirm=True` sends | to, subject, body, cc, bcc, account, confirm |
+| `create_draft(to, subject, body, ...)` | **Write.** Save an unsent draft | to, subject, body, cc, bcc, account |
+| `reply_email(message_id, body, ...)` | **Write.** Native reply; draft by default | message_id, body, account, mailbox, reply_all, confirm |
+| `reply_draft(message_id, body, ...)` | **Write.** Native reply draft; no send option | message_id, body, account, mailbox, reply_all |
 
 ## MCP Resources (1 total)
 
@@ -104,7 +107,7 @@ Startup Sync Flow:
 ### Layer Separation
 
 1. **cli.py** - CLI entry point, commands for indexing
-2. **server.py** - 11 MCP tools, uses builders and index
+2. **server.py** - 14 MCP tools, uses builders and index
 3. **builders.py** - Constructs JXA scripts from Python, type-safe
 4. **executor.py** - Runs scripts via osascript, handles JSON parsing
 5. **index/** - FTS5 search index with disk-based sync
@@ -163,7 +166,7 @@ Strategy 3: Iterate all mailboxes ← slowest, always works (with timeout)
 
 All strategies return identical response schema. Strategy 0 extracts read/flagged
 from plist footer flags bitmask (bit 0 = read, bit 4 = flagged) and date_sent,
-reply_to, message_id from MIME headers.
+reply_to, message_id and structured to/cc recipients from MIME headers.
 
 ### Design Patterns
 
@@ -456,6 +459,9 @@ apple-mail-mcp extract      # Extract attachment (JSON output)
 apple-mail-mcp mark         # Mark read/unread, flag/unflag (write)
 apple-mail-mcp move         # Move / archive / trash (write)
 apple-mail-mcp send         # Draft by default; --confirm sends (write)
+apple-mail-mcp draft        # Save a draft; no send option (write)
+apple-mail-mcp reply        # Native reply; --confirm sends (write)
+apple-mail-mcp reply-draft  # Native reply draft; no send option (write)
 apple-mail-mcp integrate claude  # Generate a Claude Code skill file
 ```
 
@@ -662,3 +668,28 @@ Chart PNGs are committed (they ARE the results). JSON and HTML in `benchmarks/re
 | **Data Exposure** | Database and attachment cache files created with 0o600 permissions | schema.py, server.py |
 | **Unbounded Memory** | Pending changes limit in watcher | watcher.py |
 | **Excluded-Account Exposure** | `APPLE_MAIL_INDEX_EXCLUDE_ACCOUNTS` boundary (#90). Every NEW tool/read path must gate: `_hidden_account()` at tool entry, `exclude_accounts` in SQL search, `_path_in_excluded_account()` before disk reads, `_resolve_visible_account()` before any JXA call that defaults to `Mail.accounts()[0]` | server.py, index/search.py |
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as local markdown under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Compose contracts
+
+Recipient strings accept bare addresses or `Name <address>`; quote names
+containing commas. Responses retain bare `to`/`cc`/`bcc` and add structured
+`recipients`. A saved `draft` reference contains account, mailbox and numeric
+Mail ID; `draft_status=unconfirmed` means readback could not identify it,
+not that saving failed. Sends return `draft=null`. Native reply tools scope
+source lookup to account/mailbox and confirm threading only from the saved
+`In-Reply-To` header. Draft-only tools carry non-destructive write hints;
+send-capable tools retain destructive hints even on their default draft path.

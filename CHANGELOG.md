@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Outgoing compose workflow (local tickets 01–06).** Recipient display names
+  are accepted with strict address validation and JSON-encoded JXA objects;
+  quote names containing commas. `create_draft` and `reply_draft` are
+  draft-only entry points, while `send_email` and `reply_email` retain
+  draft-by-default, explicit-confirmation sending. Native replies use scoped
+  source lookup and Mail's threading headers. Compose results include
+  structured recipients and a scoped saved-draft reference when verified,
+  with explicit unconfirmed readback otherwise. Disabled sender accounts are
+  rejected before composing. CLI twins: `draft`, `reply`, `reply-draft`;
+  `--body -` reads stdin. All tools expose MCP risk annotations.
+- **Full-email recipients.** `get_email` now returns structured `to` and `cc`
+  recipients on disk and every JXA fallback path, including decoded RFC 2047
+  display names. Empty headers produce empty lists.
+
 - **Global development launcher.** `just setup` now binds the global
   `apple-mail-mcp` command to the current checkout, with editable source and
   locked dependency sync on each launch. `just dev-link`, `just dev-status`,

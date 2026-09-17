@@ -133,9 +133,47 @@ class TestValidation:
 
     @pytest.mark.asyncio
     @patch(JXA, new_callable=AsyncMock)
-    async def test_display_name_form_rejected(self, mock_jxa):
+    async def test_display_name_form_accepted(self, mock_jxa):
+        mock_jxa.return_value = _draft_result()
+        await send_email(["Name <a@b.com>"], "Hi", "Body")
+        script = mock_jxa.call_args.args[0]
+        assert json.dumps({"name": "Name", "address": "a@b.com"}) in script
+        assert "Mail.ToRecipient" in script
+
+    @pytest.mark.asyncio
+    @patch(JXA, new_callable=AsyncMock)
+    async def test_quoted_name_and_injection_stay_data(self, mock_jxa):
+        from email.utils import formataddr
+
+        name = 'Light, Juliana @ San Diego; x"); Mail.quit(); ("'
+        mock_jxa.return_value = _draft_result()
+        await send_email([formataddr((name, "a@b.com"))], "Hi", "Body")
+        script = mock_jxa.call_args.args[0]
+        assert json.dumps(name) in script
+        assert "Mail.quit()" not in script.replace(json.dumps(name), "")
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "Light, Juliana @ San Diego <a@b.com>",
+            "Name\r\nBcc: other@bad.invalid <a@b.com>",
+            "Name\x00 <a@b.com>",
+            "=?utf-8?q?Name=0D=0ABcc=3A_hidden?= <a@b.com>",
+            "=?utf-8?q?Name=00?= <a@b.com>",
+            "Name <a@@b>",
+            "Name <a@b.com> extra",
+            "Name <a@b.com>, other@b.com",
+            '"Name <hidden>" <a@b.com>',
+            'Name <"a"@b.com>',
+        ],
+    )
+    @pytest.mark.asyncio
+    @patch(JXA, new_callable=AsyncMock)
+    async def test_malformed_named_recipient_rejected(
+        self, mock_jxa, recipient
+    ):
         with pytest.raises(ValueError, match="to: invalid address"):
-            await send_email(["Name <a@b.com>"], "Hi", "Body")
+            await send_email([recipient], "Hi", "Body")
         mock_jxa.assert_not_called()
 
     @pytest.mark.asyncio

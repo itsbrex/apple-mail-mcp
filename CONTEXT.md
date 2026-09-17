@@ -81,8 +81,14 @@ An unsent outgoing email saved in Apple Mail; creating a draft is a mail
 change even though delivery has not been requested.
 _Avoid_: Preview, sent email
 
+**Reply**:
+A newly composed response to a scoped email, retaining the source
+conversation through its Internet Message-ID, with recipients derived by
+Apple Mail. A reply may remain a draft or be sent with explicit confirmation.
+_Avoid_: New message with only a matching subject, sending an existing draft
+
 **Send confirmation**:
-Explicit authorization to send a newly composed email with the supplied
+Explicit authorization to send a newly composed email or reply with the supplied
 content and recipients; it does not select or send a previously saved draft.
 _Avoid_: Draft approval token, confirmation of recipient delivery
 

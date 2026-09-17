@@ -1,6 +1,6 @@
 # Tools
 
-Apple Mail MCP provides **11 MCP tools** — a consolidated API designed for AI assistants.
+Apple Mail MCP provides **14 MCP tools** — a consolidated API designed for AI assistants.
 
 ## Overview
 
@@ -17,8 +17,19 @@ Apple Mail MCP provides **11 MCP tools** — a consolidated API designed for AI 
 | `update_email_status()` | **Write.** Mark read/unread, flag/unflag | `message_ids`, `read?`, `flagged?`, `account?`, `mailbox?` |
 | `move_email()` | **Write.** Move / archive / trash | `message_ids`, `target_mailbox`, `account?`, `mailbox?` |
 | `send_email()` | **Write.** Draft by default; send with `confirm` | `to`, `subject`, `body`, `cc?`, `bcc?`, `account?`, `confirm?` |
+| `create_draft(to, subject, body, ...)` | **Write.** Save an unsent draft | to, subject, body, cc, bcc, account |
+| `reply_email(message_id, body, ...)` | **Write.** Native reply; draft by default | message_id, body, account, mailbox, reply_all, confirm |
+| `reply_draft(message_id, body, ...)` | **Write.** Native reply draft; no send option | message_id, body, account, mailbox, reply_all |
 
 ---
+
+Every tool exposes [MCP annotations](https://gofastmcp.com/servers/tools#mcp-annotations).
+Reads are read-only and idempotent; status updates are non-destructive and
+idempotent; mailbox moves and draft-only tools are non-destructive writes.
+`send_email` and `reply_email` remain destructive because they can transmit.
+All use `openWorldHint=true`. Attachment extraction writes a local cache but
+does not change mail. Hints are advisory: clients choose their approval UI,
+and every write remains blocked in read-only mode.
 
 ## `list_accounts()`
 
@@ -113,7 +124,7 @@ Get a single email with full content. Uses a 4-strategy cascade to find the mess
 | `account` | `string?` | env default | Helps find the message faster |
 | `mailbox` | `string?` | `INBOX` | Helps find the message faster |
 
-**Returns:** Full email with: `id`, `subject`, `sender`, `content` (full body text), `date_received`, `date_sent`, `read`, `flagged`, `reply_to`, `message_id` (RFC 822 Message-ID header), `attachments` (list of `{filename, mime_type, size}`).
+**Returns:** Full email with: `id`, `subject`, `sender`, `content` (full body text), `date_received`, `date_sent`, `read`, `flagged`, `reply_to`, `message_id` (RFC 822 Message-ID header), `to` and `cc` (lists of `{name, address}`, empty when absent), `attachments` (list of `{filename, mime_type, size}`).
 
 ```python
 get_email(12345)
@@ -319,6 +330,8 @@ move_email([12345, 12346], "Trash")
 ## `send_email()`
 
 Compose an email. **Saves a draft by default**; only `confirm=True` transmits.
+Prefer `create_draft` when saving an unsent message. Disabled accounts are
+rejected; Mail must retain a sender address belonging to the selected account.
 
 **Parameters:**
 
@@ -332,7 +345,26 @@ Compose an email. **Saves a draft by default**; only `confirm=True` transmits.
 | `account` | `string?` | env default | Account to send from (its primary address is the sender) |
 | `confirm` | `bool` | `False` | `False` saves a draft in Mail.app; `True` sends now |
 
-**Returns:** `{"status": "draft" | "sent", "account", "to", "cc", "bcc", "subject"}`.
+Recipients may be bare addresses or `Name <address>` strings. Names containing
+commas must be quoted, for example `'"Doe, Jane" <jane@example.com>'`.
+Each list entry contains exactly one recipient. At most 10 recipients across
+To/Cc/Bcc; malformed addresses, control characters and ambiguous lists fail
+before Mail is called.
+
+**Returns:** `status`, `account`, bare-address `to`/`cc`/`bcc`, `subject`,
+structured `recipients: {to: [{name, address}], cc: [...], bcc: [...]}`,
+`draft`, and `draft_status`.
+
+When uniquely identified after save, `draft` is
+`{"account": "Work", "mailbox": "Drafts", "message_id": 12345}` and
+`draft_status` is `confirmed`. This is the actual saved Mail message ID,
+not the unrelated outgoing-message ID. Localized/provider mailbox names
+are returned as stored. Delayed, inaccessible or ambiguous readback returns
+`draft: null`, `draft_status: "unconfirmed"` even though save succeeded.
+Check Drafts before retrying; repeated calls create separate messages.
+Sends return `draft: null`, `draft_status: "not_applicable"`; `sent` means
+Mail accepted the request, not recipient delivery. `confirm=True` composes
+a new message and does not send a previously saved draft.
 
 ```python
 send_email(["a@example.com"], "Lunch?", "Thursday works for me.")
@@ -343,6 +375,49 @@ send_email(["a@example.com"], "Lunch?", "Thursday works for me.", confirm=True)
 
 !!! warning
     `confirm=True` sends immediately with no further prompt. Agents should surface the draft to the user and only confirm on explicit approval.
+
+---
+
+## `create_draft()`
+
+Same recipient, subject, body and account arguments and return shape as
+`send_email`, with **no `confirm` parameter**. Always saves a draft. Its
+script contains no send instruction. Read-only mode still blocks it.
+CLI: `apple-mail-mcp draft --to 'Name <a@example.com>' -s Hi -b -` reads
+the body from stdin.
+
+## `reply_draft()` and `reply_email()`
+
+Create a reply using Mail's native reply command for thread headers and
+recipients. The original message is re-quoted as plain text after the
+supplied body. On Mail 16, a native AppleScript setter applies the body
+because JXA rich-text assignment is ignored. The body is verified before
+saving or sending. HTML formatting and original attachments are not copied.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `message_id` | `int` | required | Positive numeric Mail ID of the source |
+| `body` | `string` | required | Plain-text reply body |
+| `account` | `string?` | configured default | Source account and sender account |
+| `mailbox` | `string?` | configured default (`INBOX`) | Source mailbox |
+| `reply_all` | `bool` | `False` | Let Mail derive all reply recipients |
+| `confirm` | `bool` | `False` | **`reply_email` only:** send this new reply |
+
+Source identity is scoped to account/mailbox; these tools never search a
+different account when lookup fails. `reply_draft` has no send option.
+Both enforce the 10-recipient ceiling without dropping recipients.
+
+Returns the compose fields above plus `in_reply_to` (the source Internet
+Message-ID) and `threaded`. `threaded=true` requires reading the saved
+`In-Reply-To` header and matching its parent ID. It is `false` when readback
+shows a mismatched/missing header, and `"unconfirmed"` when no saved header
+could be checked (including sent replies). No top-level `message_id` is
+added; the numeric draft ID is nested in the scoped `draft` reference.
+
+```bash
+apple-mail-mcp reply-draft 12345 -a Work -m Archive -b "Thanks." --reply-all
+apple-mail-mcp reply 12345 -a Work -m Archive -b "Thanks." --confirm
+```
 
 ---
 

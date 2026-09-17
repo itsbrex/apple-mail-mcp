@@ -94,6 +94,34 @@ class TestParseEmlx:
 class TestParseEmlxExtendedFields:
     """Tests for extended fields from plist footer and MIME headers."""
 
+    def test_recipient_headers_decode_names_and_multiple_headers(
+        self, tmp_path
+    ):
+        mime = (
+            b"From: sender@example.com\n"
+            b"To: =?utf-8?q?Jos=C3=A9?= <jose@example.com>\n"
+            b'To: "Doe, Jane" <jane@example.com>\n'
+            b"Cc: peer@example.com\n\nBody"
+        )
+        path = tmp_path / "123.emlx"
+        path.write_bytes(str(len(mime)).encode() + b"\n" + mime)
+        result = parse_emlx(path)
+        assert result is not None
+        assert result.to == [
+            {"name": "José", "address": "jose@example.com"},
+            {"name": "Doe, Jane", "address": "jane@example.com"},
+        ]
+        assert result.cc == [{"name": "", "address": "peer@example.com"}]
+
+    def test_absent_recipient_headers_are_empty_lists(self, tmp_path):
+        mime = b"From: sender@example.com\n\nBody"
+        path = tmp_path / "124.emlx"
+        path.write_bytes(str(len(mime)).encode() + b"\n" + mime)
+        result = parse_emlx(path)
+        assert result is not None
+        assert result.to == []
+        assert result.cc == []
+
     def test_plist_flags_read_and_flagged(self, tmp_path: Path):
         """Plist footer flags bitmask: bit 0 = read, bit 4 = flagged."""
         mime = (
