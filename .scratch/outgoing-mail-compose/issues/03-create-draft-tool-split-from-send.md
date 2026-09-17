@@ -1,6 +1,6 @@
 # Add `create_draft` so drafting is not classified as a destructive send
 
-Status: needs-triage
+Status: resolved
 Blocked by: none
 
 ## Problem

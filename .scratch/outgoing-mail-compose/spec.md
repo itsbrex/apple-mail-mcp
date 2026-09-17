@@ -86,10 +86,35 @@ Delivery checklist (authoritative for these six issues):
 - [x] Implement issues 01–06 and targeted regression coverage.
 - [x] Verify native behavior using disposable synthetic messages.
 - [x] Run full `just check` (712 tests) and all six read-only live smoke steps.
-- [ ] Complete separate standards/spec reviews and address findings.
-- [ ] Commit local issue-tracker conventions and completed issue records.
-- [ ] Commit compose/readback implementation, tests, and public documentation.
-- [ ] Build distribution and refresh/verify `just dev-link`.
+- [x] Complete separate standards/spec reviews; neither found issues.
+- [x] Commit local issue-tracker conventions and issue records: `d6f661c`.
+- [x] Commit compose/readback implementation, tests, and documentation: `9f9dcfa`.
+- [x] Build distribution and refresh/verify `just dev-link`.
 
 The unrelated `docs/plans/index.html` timestamp and existing stash remain
 outside this work. No release, tag, push, or registry install is requested.
+
+
+## Delivery evidence
+
+- `just check`: 712 tests passed; lint, formatting, and types passed.
+- `APPLE_MAIL_READ_ONLY=1 just smoke` with an explicit enabled account:
+  status, accounts, mailboxes, emails, search, and read all passed.
+- Separate Standards and Spec reviews found no actionable findings against
+  the pinned pre-commit snapshot `9066a2c6` (base `bf50b082`).
+- `uv build` produced the 0.5.0 wheel and source distribution. Archive
+  contents matched current Python/JXA source. No version/release was cut.
+- `just dev-link` and `just dev-status` verified
+  `/Users/hack/.local/bin/apple-mail-mcp` is bound to this checkout and
+  preserves the previous executable. Fresh stdio initialization listed
+  all 14 tools, forwarded annotations, and draft-only schemas without
+  `confirm`. The global CLI exposed `draft`, `reply`, and `reply-draft`.
+- Existing MCP processes retain imported code until their next reconnect.
+- Synthetic cleanup was verified through fresh reads: no fixture drafts,
+  outgoing objects, dedicated test mailboxes, or Mail dialogs remain. Saved
+  drafts moved to Trash; the synthetic source/import folders were removed
+  through Mail's UI after its scripting deletion handler failed. A normal
+  quit/relaunch cleared outgoing objects; no force quit or account-setting
+  change was used. The original Inbox view was restored.
+- Six issue records are resolved. Unrelated dashboard timestamp and the
+  existing WIP stash were preserved. No push was performed.

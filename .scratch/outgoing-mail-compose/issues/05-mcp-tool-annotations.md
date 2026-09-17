@@ -1,6 +1,6 @@
 # Add MCP tool annotations (`destructiveHint`, `readOnlyHint`) to every tool
 
-Status: needs-triage
+Status: resolved
 Blocked by: none
 
 ## Problem

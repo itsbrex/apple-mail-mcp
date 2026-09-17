@@ -1,6 +1,6 @@
 # Add `reply_email`: native threaded reply (reply / reply-all) as a draft
 
-Status: needs-triage
+Status: resolved
 Blocked by: none
 
 ## Problem

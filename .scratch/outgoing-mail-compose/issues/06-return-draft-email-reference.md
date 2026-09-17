@@ -1,6 +1,6 @@
 # Return the saved draft's email reference from every compose tool
 
-Status: needs-triage
+Status: resolved
 Blocked by: none
 
 ## Problem

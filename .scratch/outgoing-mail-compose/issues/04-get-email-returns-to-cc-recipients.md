@@ -1,6 +1,6 @@
 # `get_email` should return `to` and `cc` recipients
 
-Status: needs-triage
+Status: resolved
 Blocked by: none
 
 ## Problem

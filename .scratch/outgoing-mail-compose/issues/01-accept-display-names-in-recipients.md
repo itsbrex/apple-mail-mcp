@@ -1,6 +1,6 @@
 # Accept recipient display names in `send_email` (`Name <addr>`)
 
-Status: needs-triage
+Status: resolved
 Blocked by: none
 
 ## Problem
