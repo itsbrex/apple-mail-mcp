@@ -10,7 +10,7 @@ The only Apple Mail MCP server with full-coverage FTS5 body search. Reliable on 
 src/apple_mail_mcp/
 ├── __init__.py         # CLI entry point, exports main()
 ├── cli.py              # CLI commands (index, status, rebuild, serve)
-├── server.py           # FastMCP server with 14 MCP tools
+├── server.py           # FastMCP server with 15 MCP tools
 ├── config.py           # Environment variable configuration
 ├── builders.py         # QueryBuilder, AccountsQueryBuilder
 ├── executor.py         # run_jxa(), execute_with_core(), execute_query()
@@ -30,13 +30,14 @@ src/apple_mail_mcp/
     └── mail_core.js    # Shared JXA utilities (MailCore object)
 ```
 
-## MCP Tools (14 total)
+## MCP Tools (15 total)
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
 | `list_accounts()` | List email accounts | - |
 | `list_mailboxes(account?)` | List mailboxes | account (optional) |
 | `get_emails(...)` | Unified listing | filter: all/unread/flagged/today/last_7_days |
+| `export_emails_page(account, after, before, ...)` | Read-only indexed ingestion pages | account, after, before, limit, cursor |
 | `get_email(id)` | Full email content + attachments | message_id |
 | `search(query, ...)` | Unified search | scope, before, after, offset, highlight |
 | `get_email_links(id)` | Extract links from an email | message_id |
@@ -107,7 +108,7 @@ Startup Sync Flow:
 ### Layer Separation
 
 1. **cli.py** - CLI entry point, commands for indexing
-2. **server.py** - 14 MCP tools, uses builders and index
+2. **server.py** - 15 MCP tools, uses builders and index
 3. **builders.py** - Constructs JXA scripts from Python, type-safe
 4. **executor.py** - Runs scripts via osascript, handles JSON parsing
 5. **index/** - FTS5 search index with disk-based sync

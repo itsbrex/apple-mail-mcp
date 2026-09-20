@@ -6,10 +6,11 @@ Apple Mail MCP Server
 2. FTS5 search — full-text body search in ~2ms with BM25 ranking
 3. JXA fallback — batch property fetching for multi-email listing
 
-TOOLS (14 total):
+TOOLS (15 total):
 - list_accounts() - List email accounts
 - list_mailboxes(account?) - List mailboxes
 - get_emails(..., filter?) - Unified email listing with filters
+- export_emails_page(account, after, before, ...) - Indexed ingestion pages
 - get_email(id) - Get single email with content (disk-first)
 - search(query, ...) - Unified search with FTS5 support
 - get_email_links(id) - Extract hyperlinks from an email
@@ -525,7 +526,7 @@ def _detect_matched_columns(query: str, result) -> str:
     return detect_matched_columns(query, result)
 
 
-# ========== MCP Tools (11 total; write tools further down) ==========
+# ========== MCP Tools (15 total; write tools further down) ==========
 
 
 @mcp.tool(
@@ -776,6 +777,86 @@ async def get_emails(
                 f" in account {target_account!r}."
             ) from None
         raise
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+async def export_emails_page(
+    account: str,
+    after: str,
+    before: str,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Export a bounded page of indexed mail for read-only ingestion.
+
+    account is an exact visible account name or UUID. after is inclusive,
+    before exclusive; ISO dates and timestamps are accepted (naive values
+    use UTC). limit is clamped to 1..100. Resume with the same account and
+    dates plus next_cursor. Pages follow index rowid, not message date.
+
+    Returns schema_version, account, normalized bounds, messages, errors,
+    next_cursor and coverage. Each message carries scoped source identity,
+    plaintext, to/cc, Message-ID, In-Reply-To, References, read/flag state,
+    and attachment metadata only. Missing or unreadable files are errors,
+    never silently successful empty bodies. No JXA message reads or writes.
+
+    Drafts, Junk, Trash and nested equivalents are always excluded, along
+    with configured index mailbox exclusions. Coverage describes only the
+    local index: archive_complete is always false. A cursor freezes an
+    index high-water mark, not the mailbox; reconcile overlapping windows
+    after index changes. No index or no disk access fails explicitly.
+    """
+    if not account or _hidden_account(account):
+        raise ValueError("Account not found.")
+    from .config import (
+        get_index_exclude_mailboxes,
+        get_index_max_emails,
+        get_index_staleness_hours,
+    )
+    from .index.disk import find_mail_directory
+    from .index.export import export_page, normalize_bounds
+
+    after, before = normalize_bounds(after, before)
+    account_map = _get_account_map()
+    await account_map.ensure_loaded()
+    accounts = account_map.get_cached_accounts() or []
+    # Match either field but fail closed on an ambiguous name/ID collision.
+    matches = [row for row in accounts if account in (row["id"], row["name"])]
+    if len(matches) != 1 or _hidden_account(matches[0]["name"]):
+        raise ValueError("Account not found.")
+    target = matches[0]
+    excluded_uuids = account_map.names_to_uuids(_excluded_account_names())
+    if target["id"] in excluded_uuids:
+        raise ValueError("Account not found.")
+    manager = _get_index_manager()
+    if not manager.has_index():
+        raise ValueError(
+            "No index found. Run 'apple-mail-mcp index' before exporting."
+        )
+    return await asyncio.to_thread(
+        export_page,
+        manager.db_path,
+        find_mail_directory(),
+        account_id=target["id"],
+        account_name=target["name"],
+        after=after,
+        before=before,
+        limit=limit,
+        cursor=cursor,
+        excluded_mailboxes=get_index_exclude_mailboxes(),
+        hidden_path=lambda path: _path_in_excluded_account(
+            path, excluded_uuids
+        ),
+        max_emails=get_index_max_emails(),
+        stale_hours=get_index_staleness_hours(),
+    )
 
 
 def _build_attachment_js() -> str:

@@ -13,7 +13,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![CI](https://github.com/imdinu/apple-mail-mcp/actions/workflows/lint.yml/badge.svg)](https://github.com/imdinu/apple-mail-mcp/actions/workflows/lint.yml)
 
-The only Apple Mail MCP server with **full-coverage body search** — reliable on large mailboxes where AppleScript-based servers timeout. 14 tools for reading, searching, extracting, and — opt-in — updating, moving, and sending email.
+The only Apple Mail MCP server with **full-coverage body search** — reliable on large mailboxes where AppleScript-based servers timeout. 15 tools for reading, searching, extracting, and — opt-in — updating, moving, and sending email.
 
 **[Read the docs](https://imdinu.github.io/apple-mail-mcp/)** for the full guide.
 
@@ -89,6 +89,7 @@ for the full schema and precedence rules.
 | `list_accounts()` | List email accounts |
 | `list_mailboxes(account?)` | List mailboxes |
 | `get_emails(filter?, limit?)` | Get emails — all, unread, flagged, today, last_7_days |
+| `export_emails_page(account, after, before, ...)` | Read-only indexed ingestion pages with resumable cursors and coverage |
 | `get_email(message_id)` | Get single email with full content + attachments |
 | `search(query, scope?, before?, after?, highlight?)` | Search — all, subject, sender, body, attachments |
 | `get_email_links(message_id)` | Extract links from an email |

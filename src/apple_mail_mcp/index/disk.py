@@ -133,6 +133,9 @@ class EmlxEmail:
     date_sent: str = ""
     reply_to: str = ""
     message_id_header: str = ""
+    in_reply_to: str = ""
+    references: list[str] = field(default_factory=list)
+    automated: bool = False
     to: list[dict[str, str]] = field(default_factory=list)
     cc: list[dict[str, str]] = field(default_factory=list)
 
@@ -341,7 +344,9 @@ def _format_timestamp(timestamp: float | int | None) -> str:
         return ""
 
 
-def parse_emlx(path: Path) -> EmlxEmail | None:
+def parse_emlx(
+    path: Path, *, require_complete: bool = False
+) -> EmlxEmail | None:
     """
     Parse a single .emlx file.
 
@@ -352,6 +357,8 @@ def parse_emlx(path: Path) -> EmlxEmail | None:
 
     Args:
         path: Path to .emlx file
+        require_complete: Reject a truncated MIME payload for ingestion;
+            the existing index/read paths retain best-effort parsing.
 
     Returns:
         EmlxEmail with parsed content, or None if parsing fails
@@ -376,6 +383,8 @@ def parse_emlx(path: Path) -> EmlxEmail | None:
         # Extract MIME content
         mime_start = newline_idx + 1
         mime_end = mime_start + byte_count
+        if require_complete and (byte_count <= 0 or mime_end > len(content)):
+            return None
         mime_content = content[mime_start:mime_end]
 
         # Parse MIME message
@@ -450,6 +459,9 @@ def parse_emlx(path: Path) -> EmlxEmail | None:
                 reply_to = msg["Reply-To"] or ""
 
         message_id_header = msg.get("Message-ID", "") or ""
+        auto_submitted = (
+            msg.get("Auto-Submitted", "no").split(";", 1)[0].strip().lower()
+        )
 
         # Extract read/flagged from plist footer flags bitmask
         read = None
@@ -484,6 +496,14 @@ def parse_emlx(path: Path) -> EmlxEmail | None:
             date_sent=date_sent,
             reply_to=reply_to,
             message_id_header=message_id_header,
+            in_reply_to=msg.get("In-Reply-To", "") or "",
+            references=re.findall(r"<[^<>\s]+>", msg.get("References", "")),
+            automated=(
+                bool(msg.get("List-Id"))
+                or bool(auto_submitted and auto_submitted != "no")
+                or msg.get("Precedence", "").strip().lower()
+                in {"bulk", "list", "junk"}
+            ),
             to=_read_recipients(msg, "To"),
             cc=_read_recipients(msg, "Cc"),
         )

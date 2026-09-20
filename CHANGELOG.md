@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bounded read-only ingestion pages.** `export_emails_page` enumerates
+  indexed emails for one visible account and an inclusive/exclusive date
+  window, with restartable rowid cursors and a fixed insertion high-water
+  mark. Pages include plaintext, scoped identity, threading headers,
+  structured recipients, automated-mail detection, and attachment metadata.
+  Drafts/Junk/Trash and nested equivalents are excluded. Missing files and
+  index gaps remain explicit; index coverage never claims a complete remote
+  archive. No mailbox status, drafts, messages, or global launcher changes.
+  Freshness uses the explicit global inventory checkpoint, with per-mailbox
+  change checkpoints reported separately; missing global proof stays unknown.
+
 - **Outgoing compose workflow (local tickets 01–06).** Recipient display names
   are accepted with strict address validation and JSON-encoded JXA objects;
   quote names containing commas. `create_draft` and `reply_draft` are

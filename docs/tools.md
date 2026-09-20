@@ -1,6 +1,6 @@
 # Tools
 
-Apple Mail MCP provides **14 MCP tools** — a consolidated API designed for AI assistants.
+Apple Mail MCP provides **15 MCP tools** — a consolidated API designed for AI assistants.
 
 ## Overview
 
@@ -9,6 +9,7 @@ Apple Mail MCP provides **14 MCP tools** — a consolidated API designed for AI 
 | `list_accounts()` | List email accounts | — |
 | `list_mailboxes()` | List mailboxes | `account?` |
 | `get_emails()` | Get emails with filtering | `account?`, `mailbox?`, `filter?`, `limit?` |
+| `export_emails_page(account, after, before, ...)` | Read-only indexed ingestion pages | account, after, before, limit, cursor |
 | `get_email()` | Get single email with content + attachments | `message_id`, `account?`, `mailbox?` |
 | `search()` | Search emails | `query`, `account?`, `mailbox?`, `scope?`, `limit?`, `exclude_mailboxes?`, `before?`, `after?`, `highlight?` |
 | `get_email_links()` | Extract links from an email | `message_id`, `account?`, `mailbox?` |
@@ -104,6 +105,91 @@ get_emails(filter="unread", limit=10)
 get_emails("Work", "INBOX", filter="today")
 # Today's work emails
 ```
+
+---
+
+## `export_emails_page(account, after, before, ...)`
+
+Read-only ingestion over the local index, across an account's included
+mailboxes. This operation is separate from `get_emails()` so its existing
+list response remains compatible. An index and disk access are required;
+there is no JXA message fallback and reads never mark mail as read.
+
+| Parameter | Type | Default | Meaning |
+|-----------|------|---------|---------|
+| `account` | string | required | Exact visible account name or UUID |
+| `after` | string | required | Inclusive ISO 8601 date/timestamp |
+| `before` | string | required | Exclusive ISO 8601 date/timestamp |
+| `limit` | integer | 50 | Scanned rows per page, clamped to 1–100 |
+| `cursor` | string or null | null | Previous `next_cursor` |
+
+Date-only and naive timestamps use UTC. Keep the same account and dates
+while resuming. Pages use ascending index rowid, so equal timestamps do not
+skip rows. New rows inserted beyond the first page's high-water mark wait
+for a later export. Cursors bind account, dates, exclusions and index file;
+they contain neither email content nor account names, addresses or paths.
+They are opaque continuation state, not credentials or authorization tokens.
+
+```python
+page = export_emails_page(
+    account="Work", after="2026-06-21", before="2026-09-20", limit=50
+)
+# Persist messages/errors before checkpointing page["next_cursor"].
+# Replay that input cursor safely after interrupted consumer writes.
+```
+
+The envelope contains `schema_version: 1`, `{id, name}` in `account`,
+normalized `after`/`before`, `messages`, `errors`, `next_cursor`, and
+`coverage`. Null `next_cursor` means the bounded index traversal ended.
+
+Each message contains `id` (numeric Mail ID), `account_id`, `account`
+(display name), `mailbox`, `subject`, `sender`, `content` (plain text),
+`to`/`cc` (lists of `{name, address}`), `date_received` (index timestamp),
+`date_sent` (MIME Date), `message_id` (Internet Message-ID), `in_reply_to`,
+`references` (Message-ID list), `read`, `flagged`, `partial`, and `automated`.
+`automated` detects List-Id, non-`no` Auto-Submitted, and bulk/list/junk
+Precedence headers. `attachments` contains `{filename, mime_type, size,
+content_id}` only; attachment bytes are neither returned nor downloaded.
+Partial `.emlx` files may lack attachment metadata. Missing optional MIME
+headers produce empty strings/lists; absent plist flags produce nulls.
+
+Each error contains `id`, `account_id`, `mailbox`, and `code`:
+`missing_emlx`, `unreadable_emlx`, `unavailable_emlx`, `identity_mismatch`,
+or `content_too_large` (plaintext above 1,000,000 characters). Errors still
+advance the cursor; retain them for retry in a later overlapping export.
+An unreadable index or denied directory access fails the tool explicitly.
+
+`coverage.scope` is always `indexed`; `archive_complete` is always false.
+`snapshot_highwater` freezes the insertion boundary, and `eligible_count`
+records the first page's candidate count. `scanned_count`, `returned_count`,
+and `failed_count` describe this page. Health includes `has_more`,
+`last_sync` (explicit global inventory sync checkpoint, null if unknown),
+`staleness_hours`, `indexed_mailboxes`, `capped_mailboxes`,
+`failed_jobs_count`, `invalid_date_count`, `excluded_mailboxes`, and warnings.
+Health counts are scoped to the requested account, not hidden accounts.
+
+`freshness_basis` is `global_sync_checkpoint` or `unknown`. Separate
+`mailbox_oldest_checkpoint`, `mailbox_latest_checkpoint`, and
+`mailbox_unknown_checkpoints` describe included mailbox records. Their
+timestamps change only when the mailbox changes, so an old mailbox
+checkpoint does not establish a stale index. A no-op inventory sync updates
+the `_global/_sync` marker without changing mailbox checkpoints. The existing
+index writer does not record that global marker on every changed sync;
+without a marker, global freshness stays unknown. Watcher insertions do not
+prove a complete inventory rescan. A stale recorded marker therefore means
+the latest **recorded global verification** is old, not that all indexed
+mail is old.
+
+**Coverage limits:** a high-water mark is not an immutable mailbox snapshot.
+Index replacement, moves, deletion and changed disk content can affect
+later pages. Reconcile an overlapping window after sync and deduplicate by
+`(account_id, mailbox, id)`; Message-ID alone cannot identify account copies.
+Freshness does not prove remote archive completeness. No sync is triggered.
+
+Drafts/Junk/Trash, Spam/Bin, Deleted Items/Deleted Messages and Junk Email/
+Junk E-mail are excluded case-insensitively at any path depth, together with
+configured index exclusions. Add localized/custom folder names to
+`APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES`; folder-role discovery is not inferred.
 
 ---
 
