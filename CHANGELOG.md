@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`get_stats`, `index://status`) see the same value as before.
   (`index/sync.py`)
 
+- **`export_emails_page` re-parsed mailbox paths per row.** The mailbox
+  visibility filter ran its path-splitting check for every scanned row
+  (~150K Python calls per page on a 38K-message account). It is now
+  memoized per mailbox, and the page query no longer selects indexed body
+  text: a 100-row page drops from ~1.7s to ~0.4s on that account.
+
 - **Release packaging stays in sync.** `just release` now validates and
   updates the plugin, marketplace plugin entry, and Claude Desktop bundle
   versions alongside Python/MCP metadata and the lockfile. It commits all

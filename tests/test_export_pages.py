@@ -388,6 +388,28 @@ async def test_changed_index_reports_gap_and_empty_never_means_complete(
     )
 
 
+async def test_mailbox_filter_runs_per_mailbox_not_per_row(
+    mailbox, monkeypatch
+):
+    from apple_mail_mcp.index import export
+
+    for mid in range(1, 41):
+        mailbox.add(mid, "INBOX" if mid % 2 else "Archive")
+    calls = []
+    original = export._mailbox_excluded
+
+    def counted(value, excluded):
+        calls.append(value)
+        return original(value, excluded)
+
+    monkeypatch.setattr(export, "_mailbox_excluded", counted)
+    result = await page(limit=5)
+    assert len(result["messages"]) == 5
+    # Two SQL-side lookups (one per mailbox) plus one path check per
+    # returned message; per-row evaluation would be several hundred.
+    assert len(calls) <= 2 + 5
+
+
 async def test_limit_is_bounded_and_missing_index_fails(mailbox):
     for mid in range(1, 103):
         mailbox.add(mid)

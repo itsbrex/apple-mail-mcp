@@ -319,16 +319,23 @@ def export_page(
         ).encode()
     ).hexdigest()
     state = _cursor_decode(cursor, scope) if cursor else None
+    # SQLite calls this once per scanned row (every row of the account,
+    # several times per page). Accounts hold a few dozen mailboxes, so
+    # memoize by name instead of re-splitting paths per row.
+    visible: dict[str | None, bool] = {}
+
+    def export_visible(mailbox: str | None) -> bool:
+        if mailbox not in visible:
+            visible[mailbox] = not _mailbox_excluded(mailbox or "", excluded)
+        return visible[mailbox]
+
     conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.create_function(
-            "export_visible",
-            1,
-            lambda mailbox: not _mailbox_excluded(mailbox or "", excluded),
-            deterministic=True,
+            "export_visible", 1, export_visible, deterministic=True
         )
         conn.execute("BEGIN")
         highwater = (
@@ -355,8 +362,10 @@ def export_page(
             "position": 0,
             "count": count,
         }
+        # Only the columns a page uses: never pull indexed body text.
         rows = conn.execute(
-            f"SELECT * FROM emails WHERE {where} "
+            "SELECT rowid, message_id, mailbox, date_received, emlx_path "
+            f"FROM emails WHERE {where} "
             "AND rowid > ? ORDER BY rowid LIMIT ?",
             (*params, state["position"], limit + 1),
         ).fetchall()
