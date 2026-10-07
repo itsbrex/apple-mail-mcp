@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **fastmcp 4 (spike).** `fastmcp>=4.0.11,<5` (MCP Python SDK v2). No
+  server code changes; tools/list, annotations and `index://status` are
+  wire-identical except tools now carry auto-generated `title`s. The
+  annotation test reads the SDK v2 snake_case fields.
+
 - **Faster CI scheduling.** Run mocked tests on Linux for Python 3.11–3.13,
   retaining one macOS Python 3.13 compatibility job on pushes to main.
   Test jobs have a ten-minute execution timeout.

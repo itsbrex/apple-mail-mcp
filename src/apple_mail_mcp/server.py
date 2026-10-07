@@ -77,7 +77,7 @@ class _LazyFastMCP:
     event stores, ...). Every CLI command imports this module for the
     tool functions but only ``serve`` needs the MCP server, so the
     import is deferred to the first ``run()``. The decorators return
-    the function unchanged, exactly like fastmcp 3.x's do, so direct
+    the function unchanged, exactly like fastmcp 3.x/4.x do, so direct
     calls (CLI, the deprecated ``get_attachment`` alias, tests) behave
     identically. Keep ``@mcp.tool`` / ``@mcp.resource(...)`` as the
     spelling — the roster drift test scans for it.

@@ -85,11 +85,11 @@ async def test_every_tool_exposes_accurate_mail_mutation_hints():
     for tool in await server.mcp.server.list_tools():
         hints = tool.annotations
         assert hints is not None, tool.name
-        assert hints.readOnlyHint is (tool.name not in writes), tool.name
+        assert hints.read_only_hint is (tool.name not in writes), tool.name
         destructive, idempotent = writes.get(tool.name, (False, True))
-        assert hints.destructiveHint is destructive, tool.name
-        assert hints.idempotentHint is idempotent, tool.name
-        assert hints.openWorldHint is True, tool.name
+        assert hints.destructive_hint is destructive, tool.name
+        assert hints.idempotent_hint is idempotent, tool.name
+        assert hints.open_world_hint is True, tool.name
 
     tree = ast.parse(SERVER_PY.read_text())
     guarded = {
