@@ -396,14 +396,16 @@ def sync_from_disk(
             (account, mailbox, now, count),
         )
 
-    # If no changes but we did a sync, still record a global timestamp
-    if not affected_mailboxes:
-        conn.execute(
-            """INSERT OR REPLACE INTO sync_state
+    # Every completed inventory pass records a global timestamp, with or
+    # without changes. Per-mailbox rows move only when that mailbox
+    # changed, so this marker is the only proof of a full rescan
+    # (export coverage reads it as its freshness basis).
+    conn.execute(
+        """INSERT OR REPLACE INTO sync_state
                (account, mailbox, last_sync, message_count)
                VALUES (?, ?, ?, ?)""",
-            ("_global", "_sync", now, 0),
-        )
+        ("_global", "_sync", now, 0),
+    )
 
     # Free the temp table contents so a long-lived connection doesn't
     # keep the temp pages around between syncs.

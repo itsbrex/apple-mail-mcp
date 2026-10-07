@@ -356,6 +356,22 @@ async def test_noop_sync_global_marker_refreshes_unchanged_mailbox(mailbox):
     assert not any("is stale" in w for w in refreshed["warnings"])
 
 
+async def test_sync_with_changes_still_records_global_freshness(mailbox):
+    """A busy mailbox changes on nearly every sync; freshness must not
+    stay "unknown" just because the last full rescan found changes."""
+    from apple_mail_mcp.index.sync import sync_from_disk
+
+    mailbox.add(1)
+    mailbox.add(2).unlink()  # Deleted on disk: the next sync must change.
+    result = sync_from_disk(mailbox.conn, mailbox.mail_dir)
+    assert result.total_changes > 0
+    coverage = (await page())["coverage"]
+    assert coverage["freshness_basis"] == "global_sync_checkpoint"
+    assert coverage["last_sync"] is not None
+    assert coverage["staleness_hours"] < 0.1
+    assert not any("freshness is unknown" in w for w in coverage["warnings"])
+
+
 async def test_changed_index_reports_gap_and_empty_never_means_complete(
     mailbox,
 ):

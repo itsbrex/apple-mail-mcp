@@ -172,11 +172,12 @@ Health counts are scoped to the requested account, not hidden accounts.
 `mailbox_oldest_checkpoint`, `mailbox_latest_checkpoint`, and
 `mailbox_unknown_checkpoints` describe included mailbox records. Their
 timestamps change only when the mailbox changes, so an old mailbox
-checkpoint does not establish a stale index. A no-op inventory sync updates
-the `_global/_sync` marker without changing mailbox checkpoints. The existing
-index writer does not record that global marker on every changed sync;
-without a marker, global freshness stays unknown. Watcher insertions do not
-prove a complete inventory rescan. A stale recorded marker therefore means
+checkpoint does not establish a stale index. Every completed inventory sync,
+with or without changes, updates the `_global/_sync` marker; mailbox
+checkpoints move only for mailboxes that changed. An index built but not
+yet synced has no marker, so global freshness stays unknown until the next
+sync (every `serve` start runs one). Watcher insertions do not prove a
+complete inventory rescan. A stale recorded marker therefore means
 the latest **recorded global verification** is old, not that all indexed
 mail is old.
 

@@ -67,6 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Export freshness was unknown after any sync that found changes.**
+  `sync_from_disk` stamped the `_global/_sync` inventory marker only on
+  no-op syncs, so on an active mailbox `export_emails_page` coverage
+  reported `freshness_basis: unknown` despite a completed rescan. Every
+  completed sync now records the marker; `MAX(last_sync)` users
+  (`get_stats`, `index://status`) see the same value as before.
+  (`index/sync.py`)
+
 - **Release packaging stays in sync.** `just release` now validates and
   updates the plugin, marketplace plugin entry, and Claude Desktop bundle
   versions alongside Python/MCP metadata and the lockfile. It commits all
