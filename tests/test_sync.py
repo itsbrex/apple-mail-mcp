@@ -202,6 +202,26 @@ class TestSyncFromDisk:
         assert result.deleted == 0
         assert result.moved == 0
 
+    def test_sync_with_changes_records_global_checkpoint(
+        self, sync_db: sqlite3.Connection, mail_dir: Path
+    ):
+        """A sync that finds changes still stamps the _global marker.
+
+        Per-mailbox rows only move when that mailbox changed, so the
+        marker is the only record of a completed full rescan.
+        """
+        self._create_emlx(mail_dir, "acc1", "INBOX", 1001)
+
+        result = sync_from_disk(sync_db, mail_dir)
+        assert result.added == 1
+
+        row = sync_db.execute(
+            "SELECT last_sync FROM sync_state"
+            " WHERE account = '_global' AND mailbox = '_sync'"
+        ).fetchone()
+        assert row is not None
+        assert row["last_sync"]
+
     def test_sync_detects_new_emails(
         self, sync_db: sqlite3.Connection, mail_dir: Path
     ):
