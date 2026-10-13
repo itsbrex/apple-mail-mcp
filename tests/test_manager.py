@@ -906,3 +906,137 @@ class TestWatcher:
         assert manager.watcher_running is False
         manager.stop_watcher()  # Should not raise
         assert manager.watcher_running is False
+
+
+class TestIndexWriterGate:
+    """index_writer=False (#106): this process lost the writer lock.
+
+    Orchestrated writers refuse loudly; opportunistic writes (reachable
+    from read paths like get_email's stale-entry cleanup) no-op so the
+    winning process's sync/watcher reconciles instead.
+    """
+
+    def teardown_method(self):
+        IndexManager._instance = None
+
+    def test_defaults_to_writer(self, temp_db_path):
+        assert IndexManager(db_path=temp_db_path).index_writer is True
+
+    @pytest.mark.parametrize(
+        "method,args",
+        [
+            ("sync_updates", ()),
+            ("build_from_disk", ()),
+            ("rebuild", ()),
+            ("start_watcher", ()),
+        ],
+    )
+    def test_orchestrated_writers_raise_when_passive(
+        self, temp_db_path, method, args
+    ):
+        manager = IndexManager(db_path=temp_db_path)
+        manager.index_writer = False
+        with pytest.raises(RuntimeError, match="index-passive"):
+            getattr(manager, method)(*args)
+
+    def test_delete_email_noops_when_passive(self, temp_db_path):
+        manager = IndexManager(db_path=temp_db_path)
+        manager.index_writer = False
+        assert manager.delete_email(12345) == 0
+        # The gate short-circuits before a connection is opened.
+        assert not temp_db_path.exists()
+
+    def test_record_parse_failure_noops_when_passive(self, temp_db_path):
+        manager = IndexManager(db_path=temp_db_path)
+        manager.index_writer = False
+        manager.record_parse_failure(
+            "/tmp/x.emlx", "acc", "INBOX", ValueError("boom")
+        )
+        assert not temp_db_path.exists()
+
+    def test_clear_parse_failure_noops_when_passive(self, temp_db_path):
+        manager = IndexManager(db_path=temp_db_path)
+        manager.index_writer = False
+        assert manager.clear_parse_failure("/tmp/x.emlx") == 0
+        assert not temp_db_path.exists()
+
+
+class TestIsEmpty:
+    """Tests for distinguishing an empty index from a populated one."""
+
+    def teardown_method(self):
+        IndexManager._instance = None
+
+    def test_fresh_index_is_empty(self, temp_db_path):
+        """A database created but never filled holds no emails."""
+        manager = IndexManager(db_path=temp_db_path)
+        assert manager.is_empty() is True
+
+    def test_index_with_rows_is_not_empty(self, temp_db_path):
+        """One indexed email is enough to answer queries."""
+        from apple_mail_mcp.index.schema import INSERT_EMAIL_SQL
+
+        manager = IndexManager(db_path=temp_db_path)
+        conn = manager._get_conn()
+        conn.execute(
+            INSERT_EMAIL_SQL,
+            (
+                1001,
+                "acct-uuid",
+                "INBOX",
+                "Quarterly report",
+                "boss@company.com",
+                "Body text",
+                "2026-01-15T10:30:00",
+                None,
+                0,
+            ),
+        )
+        conn.commit()
+
+        assert manager.is_empty() is False
+
+
+class TestSyncBlockedReason:
+    """A blocked sync returns 0 changes — the same as a clean one.
+
+    Without a recorded reason the caller reports "index up to date"
+    while the index quietly goes stale (#110).
+    """
+
+    def teardown_method(self):
+        IndexManager._instance = None
+
+    @pytest.mark.parametrize(
+        "error_cls, expected",
+        [(PermissionError, "permission"), (FileNotFoundError, "missing")],
+    )
+    @patch("apple_mail_mcp.index.disk.find_mail_directory")
+    def test_blocked_sync_records_why(
+        self, mock_find, error_cls, expected, temp_db_path
+    ):
+        mock_find.side_effect = error_cls("Cannot access")
+
+        manager = IndexManager(db_path=temp_db_path)
+        assert manager.sync_updates() == 0
+        assert manager.last_sync_blocked == expected
+
+    @patch("apple_mail_mcp.index.sync.sync_from_disk")
+    @patch("apple_mail_mcp.index.disk.find_mail_directory")
+    def test_successful_sync_clears_a_previous_block(
+        self, mock_find, mock_sync, temp_db_path
+    ):
+        """Granting access mid-session must clear the warning state."""
+        mock_find.side_effect = PermissionError("Cannot access")
+        manager = IndexManager(db_path=temp_db_path)
+        manager.sync_updates()
+        assert manager.last_sync_blocked == "permission"
+
+        mock_find.side_effect = None
+        mock_find.return_value = Path("/fake/mail")
+        mock_result = MagicMock()
+        mock_result.total_changes = 3
+        mock_sync.return_value = mock_result
+
+        assert manager.sync_updates() == 3
+        assert manager.last_sync_blocked is None

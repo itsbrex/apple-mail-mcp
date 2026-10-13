@@ -21,11 +21,14 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, TypeVar
+from typing import TYPE_CHECKING, Annotated, TypeVar
 
 import cyclopts
 
 from .config import get_index_path
+
+if TYPE_CHECKING:
+    from .index import IndexLock, IndexManager
 
 T = TypeVar("T")
 
@@ -86,6 +89,104 @@ def _progress_bar(current: int, total: int | None, width: int = 40) -> str:
     return f"[{bar}] {pct * 100:.0f}%"
 
 
+def _index_writer_retry_loop(
+    lock: "IndexLock",
+    manager: "IndexManager",
+    on_promote: Callable[[], None],
+    interval: float,
+) -> None:
+    """Retry the index writer lock until this instance wins it (#106).
+
+    Runs in a daemon thread on index-passive server instances. The
+    kernel releases flock when the writer exits, so a survivor promotes
+    within one interval: it flips ``index_writer`` and runs the same
+    sync-then-watch path a winning startup would have.
+    """
+    while True:
+        time.sleep(interval)
+        if lock.try_acquire():
+            manager.index_writer = True
+            print(
+                "Index writer lock acquired — promoting to writer",
+                file=sys.stderr,
+                flush=True,
+            )
+            on_promote()
+            return
+
+
+# How long CLI write commands (index/rebuild) wait for the index
+# writer lock before giving up with instructions.
+_CLI_LOCK_TIMEOUT_SEC = 30.0
+
+# One warning per process for a sync that cannot read the Mail store
+# (#110) — a promoted writer retries the same sync, and repeating the
+# notice every cycle would train the reader to ignore it.
+_sync_blocked_warned = False
+
+
+def _warn_sync_blocked(reason: str) -> None:
+    """Report a sync that could not read the Mail store.
+
+    Without this the sync returns 0 changes and the server reports
+    "Index up to date", so an index that stopped updating months ago
+    looks healthy while search silently decays.
+    """
+    global _sync_blocked_warned
+    if _sync_blocked_warned:
+        return
+    _sync_blocked_warned = True
+
+    if reason == "permission":
+        detail = (
+            "Full Disk Access is not granted to the process running "
+            "the server, so ~/Library/Mail could not be read.\n"
+            "  Grant it in System Settings → Privacy & Security → "
+            "Full Disk Access, then restart the server."
+        )
+    else:
+        detail = (
+            "The Apple Mail data directory was not found. Ensure Mail "
+            "has been set up and used on this Mac."
+        )
+
+    print(
+        f"Warning: index sync could not read your mail — the index is "
+        f"NOT up to date and search results will be stale.\n  {detail}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _acquire_cli_index_lock(manager: "IndexManager") -> "IndexLock":
+    """Acquire the index writer lock for a CLI write command (#106).
+
+    A running server holds the lock for its lifetime, so after a short
+    wait this fails with instructions rather than racing the server's
+    watcher (that race is documented as unsafe in
+    ``IndexManager.build_from_disk``). A running server re-acquires
+    the lock within its retry interval once the CLI command finishes.
+    """
+    from .index import IndexLock
+
+    lock = IndexLock(manager.db_path)
+    if lock.try_acquire():
+        return lock
+    print(
+        "Index locked by another process (a running server?) — "
+        f"waiting up to {_CLI_LOCK_TIMEOUT_SEC:.0f}s...",
+        file=sys.stderr,
+    )
+    if lock.acquire(timeout=_CLI_LOCK_TIMEOUT_SEC):
+        return lock
+    print(
+        "✗ A running apple-mail-mcp server holds the index writer "
+        "lock. Stop it and retry.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _run_serve(watch: bool = False, read_only: bool = False) -> None:
     """Internal function to run the MCP server."""
     import threading
@@ -108,6 +209,20 @@ def _run_serve(watch: bool = False, read_only: bool = False) -> None:
     except Exception:
         pass
 
+    from .config import get_lock_retry_seconds
+    from .index import IndexLock
+
+    # Single-writer coordination (#106): only one process may write
+    # the index. Acquired even when no index exists yet — the
+    # opportunistic write paths (stale-entry cleanup, DLQ records)
+    # create the database file on first use, and two uncoordinated
+    # instances doing that is exactly what the lock exists to
+    # prevent. The lock object must outlive this function's sync
+    # block — it is held for the process lifetime (the frame stays
+    # alive while mcp.run() blocks below).
+    index_lock = IndexLock(manager.db_path)
+    is_writer = index_lock.try_acquire()
+
     if manager.has_index():
 
         def _background_sync() -> None:
@@ -115,7 +230,12 @@ def _run_serve(watch: bool = False, read_only: bool = False) -> None:
                 start = time.time()
                 count = manager.sync_updates()
                 elapsed = time.time() - start
-                if count > 0:
+                if manager.last_sync_blocked:
+                    # A blocked sync also returns 0 changes. Reporting
+                    # "up to date" here is how a once-good index goes
+                    # quietly stale for months (#110).
+                    _warn_sync_blocked(manager.last_sync_blocked)
+                elif count > 0:
                     print(
                         f"Background sync: {count} changes "
                         f"({_format_time(elapsed)})",
@@ -151,13 +271,54 @@ def _run_serve(watch: bool = False, read_only: bool = False) -> None:
                         file=sys.stderr,
                     )
 
-        sync_thread = threading.Thread(target=_background_sync, daemon=True)
-        sync_thread.start()
+        if is_writer:
+            sync_thread = threading.Thread(target=_background_sync, daemon=True)
+            sync_thread.start()
+            print(
+                "Syncing index in background...",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            manager.index_writer = False
+            interval = get_lock_retry_seconds()
+            print(
+                "Another instance is syncing the index — running "
+                f"index-passive (retrying every {interval:.0f}s)",
+                file=sys.stderr,
+                flush=True,
+            )
+            retry_thread = threading.Thread(
+                target=_index_writer_retry_loop,
+                args=(index_lock, manager, _background_sync, interval),
+                daemon=True,
+            )
+            retry_thread.start()
+    else:
+        # Serving with no index at all is legal — subject and sender
+        # searches fall back to live Mail queries — but body search
+        # is unavailable, and nothing else says so (#110).
         print(
-            "Syncing index in background...",
+            f"No search index found at {manager.db_path} — body search "
+            "is unavailable and subject/sender searches fall back to "
+            "slower live queries.\n  Run 'apple-mail-mcp index' to "
+            "build it (needs Full Disk Access for your terminal).",
             file=sys.stderr,
             flush=True,
         )
+        if not is_writer:
+            # No index AND another process holds the lock (an index
+            # build, or another server whose opportunistic writes may
+            # create one). Stay index-passive so this instance can't
+            # create a competing database file; promote when freed.
+            manager.index_writer = False
+            interval = get_lock_retry_seconds()
+            retry_thread = threading.Thread(
+                target=_index_writer_retry_loop,
+                args=(index_lock, manager, lambda: None, interval),
+                daemon=True,
+            )
+            retry_thread.start()
 
     mcp.run()
 
@@ -194,7 +355,11 @@ def serve(
 
     At startup, the index is automatically synced with disk (fast, <5s).
     Use --watch to enable real-time index updates when emails arrive.
-    Requires Full Disk Access for the terminal.
+
+    Serving an existing index needs no Full Disk Access. Keeping it
+    fresh does: grant FDA to the app that launches this server (your
+    MCP client), otherwise the startup sync reads nothing and a
+    warning is printed.
     """
     _run_serve(watch=watch, read_only=read_only)
 
@@ -224,66 +389,72 @@ def index(
     """
     from .index import IndexManager
 
-    print("Building search index from disk...")
-    print(f"Index location: {get_index_path()}")
-    if profile:
-        print(f"Profiling: writing cProfile dump to {profile}")
-    print()
-
     manager = IndexManager()
-    start = time.time()
-    last_report = start
-
-    def progress(current: int, total: int | None, message: str) -> None:
-        nonlocal last_report
-        now = time.time()
-
-        # Throttle updates to avoid spam
-        if now - last_report < 0.5 and total is None:
-            return
-        last_report = now
-
-        if verbose:
-            if total:
-                bar = _progress_bar(current, total)
-                print(f"\r{bar} {message}", end="", flush=True)
-            else:
-                print(f"\r{message}", end="", flush=True)
-
-    try:
-        callback = progress if verbose else None
-        count = _run_optionally_profiled(
-            lambda: manager.build_from_disk(progress_callback=callback),
-            profile_path=profile,
-        )
-        elapsed = time.time() - start
-
-        if verbose:
-            print()  # Newline after progress
-
+    with _acquire_cli_index_lock(manager):
+        # Announce only once the lock is won — otherwise a contended
+        # run interleaves "Building..." with the waiting/error output.
+        print("Building search index from disk...")
+        print(f"Index location: {get_index_path()}")
+        if profile:
+            print(f"Profiling: writing cProfile dump to {profile}")
         print()
-        print(f"✓ Indexed {count:,} emails in {_format_time(elapsed)}")
 
-        stats = manager.get_stats()
-        print(f"  Mailboxes: {stats.mailbox_count}")
-        print(f"  Database size: {_format_size(stats.db_size_mb)}")
+        start = time.time()
+        last_report = start
 
-    except PermissionError as e:
-        print(f"\n✗ Permission denied: {e}", file=sys.stderr)
-        print("\nTo fix this:", file=sys.stderr)
-        print("  1. Open System Settings", file=sys.stderr)
-        print("  2. Privacy & Security → Full Disk Access", file=sys.stderr)
-        print("  3. Add and enable Terminal.app", file=sys.stderr)
-        print("  4. Restart terminal and try again", file=sys.stderr)
-        sys.exit(1)
+        def progress(current: int, total: int | None, message: str) -> None:
+            nonlocal last_report
+            now = time.time()
 
-    except FileNotFoundError as e:
-        print(f"\n✗ Not found: {e}", file=sys.stderr)
-        sys.exit(1)
+            # Throttle updates to avoid spam
+            if now - last_report < 0.5 and total is None:
+                return
+            last_report = now
 
-    except Exception as e:
-        print(f"\n✗ Error: {e}", file=sys.stderr)
-        sys.exit(1)
+            if verbose:
+                if total:
+                    bar = _progress_bar(current, total)
+                    print(f"\r{bar} {message}", end="", flush=True)
+                else:
+                    print(f"\r{message}", end="", flush=True)
+
+        try:
+            callback = progress if verbose else None
+            count = _run_optionally_profiled(
+                lambda: manager.build_from_disk(progress_callback=callback),
+                profile_path=profile,
+            )
+            elapsed = time.time() - start
+
+            if verbose:
+                print()  # Newline after progress
+
+            print()
+            print(f"✓ Indexed {count:,} emails in {_format_time(elapsed)}")
+
+            stats = manager.get_stats()
+            print(f"  Mailboxes: {stats.mailbox_count}")
+            print(f"  Database size: {_format_size(stats.db_size_mb)}")
+
+        except PermissionError as e:
+            print(f"\n✗ Permission denied: {e}", file=sys.stderr)
+            print("\nTo fix this:", file=sys.stderr)
+            print("  1. Open System Settings", file=sys.stderr)
+            print(
+                "  2. Privacy & Security → Full Disk Access",
+                file=sys.stderr,
+            )
+            print("  3. Add and enable Terminal.app", file=sys.stderr)
+            print("  4. Restart terminal and try again", file=sys.stderr)
+            sys.exit(1)
+
+        except FileNotFoundError as e:
+            print(f"\n✗ Not found: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        except Exception as e:
+            print(f"\n✗ Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 @app.command
@@ -414,36 +585,39 @@ def rebuild(
     elif account:
         scope = f"account {account}"
 
-    print(f"Rebuilding {scope}...")
-    if profile:
-        print(f"Profiling: writing cProfile dump to {profile}")
-
     manager = IndexManager()
-    start = time.time()
+    with _acquire_cli_index_lock(manager):
+        # Announce only once the lock is won — otherwise a contended
+        # run interleaves "Rebuilding..." with the waiting/error output.
+        print(f"Rebuilding {scope}...")
+        if profile:
+            print(f"Profiling: writing cProfile dump to {profile}")
 
-    def progress(current: int, total: int | None, message: str) -> None:
-        if verbose:
-            print(f"\r{message}", end="", flush=True)
+        start = time.time()
 
-    try:
-        count = _run_optionally_profiled(
-            lambda: manager.rebuild(
-                account=account,
-                mailbox=mailbox,
-                progress_callback=progress if verbose else None,
-            ),
-            profile_path=profile,
-        )
-        elapsed = time.time() - start
+        def progress(current: int, total: int | None, message: str) -> None:
+            if verbose:
+                print(f"\r{message}", end="", flush=True)
 
-        if verbose:
-            print()
+        try:
+            count = _run_optionally_profiled(
+                lambda: manager.rebuild(
+                    account=account,
+                    mailbox=mailbox,
+                    progress_callback=progress if verbose else None,
+                ),
+                profile_path=profile,
+            )
+            elapsed = time.time() - start
 
-        print(f"✓ Rebuilt {count:,} emails in {_format_time(elapsed)}")
+            if verbose:
+                print()
 
-    except Exception as e:
-        print(f"\n✗ Error: {e}", file=sys.stderr)
-        sys.exit(1)
+            print(f"✓ Rebuilt {count:,} emails in {_format_time(elapsed)}")
+
+        except Exception as e:
+            print(f"\n✗ Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 @app.default

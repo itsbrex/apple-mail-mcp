@@ -95,11 +95,12 @@ get_emails("Work", "INBOX", filter="today")
 
 ## `get_email()`
 
-Get a single email with full content. Uses a 3-strategy cascade to find the message:
+Get a single email with full content. Uses a 4-strategy cascade to find the message:
 
-1. Try the specified mailbox directly
-2. Look up the email's location in the FTS5 index
-3. Iterate all mailboxes with per-mailbox error handling
+0. Read the `.emlx` file directly from disk via the index (~1–5ms, no JXA)
+1. Try the specified mailbox directly via JXA
+2. Look up the email's real location in the FTS5 index, then JXA
+3. Iterate all mailboxes with per-mailbox error handling (15s timeout, max 50 mailboxes)
 
 **Parameters:**
 
@@ -155,6 +156,16 @@ Search emails with automatic FTS5 optimization. Uses the FTS5 index for fast sea
 | `attachments` | Attachment filenames | SQL (requires index) |
 
 **Returns:** List of results sorted by relevance (FTS5) or date (JXA fallback), each with: `id`, `subject`, `sender`, `date_received`, `score`, `matched_in`, and optionally `content_snippet`, `account`, `mailbox`.
+
+**When nothing is found**, the return is `{"result": [], "hint": "..."}` instead of a list. The hint distinguishes three different situations, so a caller never mistakes an unusable index for an empty mailbox:
+
+| Situation | What the hint says |
+|-----------|--------------------|
+| Genuine zero match | Try fewer keywords, check spelling, widen the scope |
+| No index built | Subject and sender were searched live; **body text was not**. Names the index path and `apple-mail-mcp index` |
+| Index exists but holds 0 emails | The build could not read your mail — names the index path and the Full Disk Access prerequisite |
+
+**Scopes only the index can serve raise instead of returning empty**: `scope="body"`, `scope="attachments"`, and any `before`/`after` filter fail with a message naming the index path and how to build it. Subject and sender searches keep their live fallback.
 
 ```python
 search("invoice")
@@ -218,13 +229,15 @@ Extract attachment content from an email. Parses the raw `.emlx` MIME structure,
 | `account` | `string?` | `None` | Account (helps disambiguate) |
 | `mailbox` | `string?` | `None` | Mailbox (helps disambiguate) |
 
-**Returns:** Dictionary with `filename`, `mime_type`, `size`, and `content_base64`. If the attachment exceeds 10 MB, returns metadata only with `truncated: true`.
+**Returns:** Dictionary with `filename`, `mime_type`, `size`, and `file_path`. The attachment bytes are written to `~/.apple-mail-mcp/attachments/` (owner-only permissions, cleaned up after 24 hours) and the path is returned — content is never inlined in the response.
 
 ```python
 get_email_attachment(12345, "invoice.pdf")
 # → {"filename": "invoice.pdf", "mime_type": "application/pdf",
-#    "size": 52340, "content_base64": "JVBERi0x..."}
+#    "size": 52340, "file_path": "/Users/you/.apple-mail-mcp/attachments/tmpa1b2/invoice.pdf"}
 ```
+
+A denied read of the email file (no Full Disk Access on the process running the server) raises an error naming the permission problem; "not found" means the attachment genuinely isn't in that message.
 
 !!! note
     Requires the FTS5 search index. If upgrading from v0.1.x, run `apple-mail-mcp rebuild` to populate attachment metadata.
@@ -264,6 +277,7 @@ Read-only JSON snapshot of FTS5 search-index health. Lets clients render an "ind
 | `failed_jobs_count` | `int` | Rows in the dead-letter queue (`.emlx` parses that failed) |
 | `last_sync` | `string?` | ISO-8601 of last sync, or `null` if never synced |
 | `staleness_hours` | `float?` | Hours since `last_sync`, rounded to 0.01 |
+| `excluded_accounts` | `list[str]` | Account display names hidden via `APPLE_MAIL_INDEX_EXCLUDE_ACCOUNTS` |
 
 **Payload (when no index):**
 

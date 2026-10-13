@@ -97,6 +97,11 @@ class IndexManager:
             db_path: Custom database path (uses config default if None)
         """
         self._db_path = db_path or get_index_path()
+        # Cross-process writer role (#106). When False (this process
+        # lost the IndexLock to another instance), sync/watch/build
+        # refuse to run and opportunistic writes become no-ops. Set
+        # by the serve path; orthogonal to the read_only mail flag.
+        self.index_writer: bool = True
         self._conn: sqlite3.Connection | None = None
         self._conn_lock = threading.Lock()
         self._watcher: IndexWatcher | None = None
@@ -107,6 +112,12 @@ class IndexManager:
         # (build/sync/watcher). Lets JXA-free paths like the disk
         # email count honor exclusions without their own JXA call.
         self._exclude_account_uuids: set[str] = set()
+        # Why the most recent sync_updates() could not read the Mail
+        # store, or None if it ran (#110). "permission" = Full Disk
+        # Access denied; "missing" = Mail directory not found. A
+        # blocked sync still returns 0 changes, which is
+        # indistinguishable from "already up to date" without this.
+        self.last_sync_blocked: str | None = None
 
     def _resolve_exclusions(self) -> set[str]:
         """Resolve configured account exclusions to UUIDs and remember
@@ -130,6 +141,19 @@ class IndexManager:
         """Get the database file path."""
         return self._db_path
 
+    def _require_writer(self, operation: str) -> None:
+        """Raise if this instance is not the index writer.
+
+        Guards the orchestrated write paths (sync/build/rebuild/watch)
+        — reaching them while index-passive is a programming error, not
+        a runtime condition to tolerate.
+        """
+        if not self.index_writer:
+            raise RuntimeError(
+                f"{operation} refused: this instance is index-passive "
+                "(another process holds the index writer lock)"
+            )
+
     def _get_conn(self) -> sqlite3.Connection:
         """Get or create the database connection (thread-safe)."""
         with self._conn_lock:
@@ -146,6 +170,22 @@ class IndexManager:
     def has_index(self) -> bool:
         """Check if an index database exists."""
         return self._db_path.exists()
+
+    def is_empty(self) -> bool:
+        """Check whether an existing index holds no emails.
+
+        A database file is created before any mail is read, so an
+        index build that ran without Full Disk Access leaves a
+        well-formed but empty index behind. Searching it returns
+        zero rows, which reads exactly like a genuine no-match
+        (#110). Cheaper than :meth:`get_stats`, which also walks
+        the Mail directory.
+
+        Raises:
+            sqlite3.Error: If the index exists but cannot be read.
+        """
+        cursor = self._get_conn().execute("SELECT EXISTS(SELECT 1 FROM emails)")
+        return cursor.fetchone()[0] == 0
 
     def get_stats(self) -> IndexStats:
         """
@@ -297,6 +337,7 @@ class IndexManager:
             PermissionError: If Full Disk Access is not granted
             FileNotFoundError: If Mail directory not found
         """
+        self._require_writer("build_from_disk")
         from .disk import find_mail_directory, scan_all_emails
 
         # Verify we can access the mail directory
@@ -509,15 +550,22 @@ class IndexManager:
         Returns:
             Number of changes (added + deleted + moved)
         """
+        self._require_writer("sync_updates")
         from .disk import find_mail_directory
         from .sync import sync_from_disk
 
         try:
             mail_dir = find_mail_directory()
         except (FileNotFoundError, PermissionError) as e:
+            # Record *why* before returning 0 — callers otherwise
+            # report a blocked sync as "index up to date" (#110).
+            self.last_sync_blocked = (
+                "permission" if isinstance(e, PermissionError) else "missing"
+            )
             logger.warning("Cannot access mail directory for sync: %s", e)
             return 0
 
+        self.last_sync_blocked = None
         exclude_account_uuids = self._resolve_exclusions()
 
         result = sync_from_disk(
@@ -599,6 +647,7 @@ class IndexManager:
         Returns:
             Number of emails re-indexed
         """
+        self._require_writer("rebuild")
         conn = self._get_conn()
 
         # Delete existing entries for rebuild scope
@@ -752,6 +801,12 @@ class IndexManager:
         Returns:
             Number of rows deleted (typically 0 or 1).
         """
+        # Opportunistic cleanup reachable from read paths (get_email
+        # stale-entry handling) — when index-passive, skip and let the
+        # writer's sync/watcher reconcile.
+        if not self.index_writer:
+            logger.debug("delete_email skipped (index-passive): %s", message_id)
+            return 0
         conn = self._get_conn()
         where = ["message_id = ?"]
         params: list = [message_id]
@@ -780,6 +835,12 @@ class IndexManager:
         `attempt_count` and refresh `last_seen` / `error_*` columns
         without losing `first_seen`.
         """
+        if not self.index_writer:
+            logger.debug(
+                "record_parse_failure skipped (index-passive): %s",
+                emlx_path,
+            )
+            return
         from .schema import RECORD_PARSE_FAILURE_SQL, parse_failure_row
 
         conn = self._get_conn()
@@ -793,6 +854,12 @@ class IndexManager:
         """Remove a path from the dead letter queue (e.g. after a
         successful retry). Returns the number of rows removed.
         """
+        if not self.index_writer:
+            logger.debug(
+                "clear_parse_failure skipped (index-passive): %s",
+                emlx_path,
+            )
+            return 0
         from .schema import CLEAR_PARSE_FAILURE_SQL
 
         conn = self._get_conn()
@@ -914,6 +981,7 @@ class IndexManager:
         Returns:
             True if watcher started, False if already running or failed
         """
+        self._require_writer("start_watcher")
         if self._watcher is not None and self._watcher.is_running:
             return False
 

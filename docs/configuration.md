@@ -39,6 +39,7 @@ config_version = 1
 
 [server]
 # read_only = false             # Disable write operations
+# lock_retry_seconds = 180      # Index-passive lock retry interval
 ```
 
 **Empty list semantics**: `exclude_mailboxes = []` explicitly means "no
@@ -53,10 +54,11 @@ as nonexistent. They are never written to the index, filtered out of
 default — an account is hidden only when explicitly named, and a name
 that matches no account is logged as a warning rather than silently
 ignored. Use it to keep a regulated-data account (e.g. PHI) out of LLM
-reach. One residual: `get_email(message_id)` with no account specified
-can still reach a hidden account's message via the live fallback if the
-id is already known — but ids for hidden accounts are not discoverable
-through the (filtered) listing and search tools.
+reach. A hidden account behaves exactly like an account that does not
+exist: `get_email()` raises the same `Email <id> not found.` whether or
+not the id is known, `search()` returns the same hints and errors a
+name that matches nothing would get, and no strategy — disk, index, or
+live JXA — is allowed to target it.
 
 **Validation**: malformed TOML, unknown keys, type mismatches, and
 `config_version` mismatches all raise a clear error with the file path
@@ -79,6 +81,7 @@ in CI or in MCP client launch configs.
 | `APPLE_MAIL_INDEX_EXCLUDE_MAILBOXES` | `Drafts` | Comma-separated mailboxes to skip in search |
 | `APPLE_MAIL_INDEX_EXCLUDE_ACCOUNTS` | _unset_ | Comma-separated account names (exact, case-sensitive) hidden from the entire server: never indexed, filtered from search, invisible to the list/get tools |
 | `APPLE_MAIL_READ_ONLY` | `false` | When `true`, disables any write operations |
+| `APPLE_MAIL_LOCK_RETRY_SECONDS` | `180` | How often an index-passive server instance retries the index writer lock (minimum 1) |
 
 ## Precedence
 
@@ -127,6 +130,32 @@ Or via environment variable:
 export APPLE_MAIL_READ_ONLY=true
 apple-mail-mcp serve
 ```
+
+## Single index writer
+
+Only one server process syncs and watches the index at a time. On
+startup, each `serve` instance tries to take an advisory lock on
+`index.db.lock` next to the database. The winner runs the background
+sync (and the file watcher with `--watch`); any other instance runs
+**index-passive** — searches and mail actions work normally, but it
+leaves index writes to the winner. This makes it safe for MCP clients
+that spawn multiple server instances (Claude Desktop starts every
+configured server twice).
+
+A passive instance retries the lock every `lock_retry_seconds`
+(default 180) and takes over automatically if the writer exits — the
+lock is released by the kernel even on a crash, so no cleanup is ever
+needed.
+
+`apple-mail-mcp index` and `apple-mail-mcp rebuild` need the same lock.
+If a running server holds it, they wait briefly and then exit with an
+error — stop the server, run the command, then start the server again.
+(A server left running in passive mode picks the lock back up within
+one retry interval of the command finishing.)
+
+Note that this is unrelated to read-only mode: `read_only` restricts
+what MCP tools may do to your mail; index-passive only concerns which
+process maintains the search index.
 
 When read-only mode is active, write-capable MCP tools raise
 `PermissionError` with a clear message rather than silently no-oping.

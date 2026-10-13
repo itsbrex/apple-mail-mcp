@@ -1,12 +1,27 @@
 # Installation
 
-## With pipx (Recommended)
+## Claude Code Plugin
+
+```bash
+claude plugin marketplace add imdinu/apple-mail-mcp
+claude plugin install apple-mail@imdinu
+```
+
+The plugin registers the MCP server automatically via a thin launcher that runs the released PyPI package (uvx → pipx → private venv, whichever is available on your machine).
+
+## Claude Desktop Bundle
+
+Download `apple-mail-mcp-<version>.mcpb` from the [latest release](https://github.com/imdinu/apple-mail-mcp/releases/latest) and double-click it. Claude Desktop installs and registers the server; the bundle uses the same launcher as the Claude Code plugin.
+
+Both surfaces launch the server with `--watch`, so the index is kept current as mail arrives. That background sync reads `~/Library/Mail/`, which needs Full Disk Access on the app that launches the server (Claude Code or Claude Desktop): **System Settings → Privacy & Security → Full Disk Access**. Then run `apple-mail-mcp index` once from a terminal that also has Full Disk Access to enable body search — see [Getting Started](getting-started.md).
+
+## With pipx
 
 ```bash
 pipx install apple-mail-mcp
 ```
 
-A persistent install is recommended because the FTS5 search index (`~/.apple-mail-mcp/index.db`) is built once and reused across sessions. Ephemeral runners like `pipx run` or `uvx` work but won't benefit from the cached index.
+The FTS5 search index (`~/.apple-mail-mcp/index.db`) is keyed to your home directory, not the install method — every install surface above shares the same index. A persistent install just avoids the small per-launch resolution overhead of ephemeral runners like `pipx run` or `uvx`.
 
 ## With uv
 

@@ -121,6 +121,39 @@ class TestGetEmails:
 
     @pytest.mark.asyncio
     @patch("apple_mail_mcp.server.execute_query_async")
+    async def test_falls_back_to_jxa_without_full_disk_access(
+        self, mock_exec, monkeypatch
+    ):
+        """No Full Disk Access -> find_mail_directory raises
+        PermissionError -> get_emails must fall back to JXA, not error."""
+
+        def _no_fda():
+            raise PermissionError("Cannot access ~/Library/Mail/V10")
+
+        monkeypatch.setattr(
+            "apple_mail_mcp.index.disk.find_mail_directory", _no_fda
+        )
+        mock_exec.return_value = [
+            {
+                "id": 7,
+                "subject": "Fallback",
+                "sender": "a@b.c",
+                "date_received": "2024-01-15T10:00:00",
+                "read": False,
+                "flagged": False,
+            }
+        ]
+
+        from apple_mail_mcp.server import get_emails
+
+        result = await get_emails(filter="unread")
+
+        assert len(result) == 1
+        assert result[0]["subject"] == "Fallback"
+        mock_exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("apple_mail_mcp.server.execute_query_async")
     async def test_filter_all_returns_emails(self, mock_exec):
         """get_emails with filter='all' returns all emails."""
         mock_exec.return_value = [
@@ -1649,3 +1682,272 @@ class TestGetAttachmentLinksMode:
             assert result["links"][0]["url"] == "https://example.com"
             assert result["links"][0]["text"] == "Example"
             assert "file_path" not in result
+
+
+class TestSearchIndexHonesty:
+    """An index that cannot answer must say so (#110).
+
+    A genuine zero-match and an index that was never built both
+    returned ``{"result": [], "hint": "try other keywords"}``, so a
+    calling model rephrased its query instead of diagnosing, and the
+    user read "no results" as "no such email".
+    """
+
+    @staticmethod
+    def _manager(*, has_index: bool, is_empty: bool = False) -> MagicMock:
+        manager = MagicMock()
+        manager.has_index.return_value = has_index
+        manager.is_empty.return_value = is_empty
+        manager.db_path = Path("/fake/home/.apple-mail-mcp/index.db")
+        return manager
+
+    @staticmethod
+    def _account_map() -> MagicMock:
+        acct_map = MagicMock()
+        acct_map.ensure_loaded = AsyncMock()
+        acct_map.name_to_uuid.return_value = None
+        acct_map.names_to_uuids.return_value = set()
+        return acct_map
+
+    @pytest.mark.asyncio
+    @patch("apple_mail_mcp.server.execute_query_async")
+    async def test_empty_jxa_fallback_names_the_missing_index(self, mock_exec):
+        """No index + no match says bodies were never searched."""
+        mock_exec.return_value = []
+
+        with patch("apple_mail_mcp.server._get_index_manager") as mock_get:
+            mock_get.return_value = self._manager(has_index=False)
+
+            from apple_mail_mcp.server import search
+
+            result = await search("renewal")
+
+        assert result["result"] == []
+        hint = result["hint"]
+        assert "index.db" in hint
+        assert "apple-mail-mcp index" in hint
+        assert "Full Disk Access" in hint
+        # The keyword hint would send the caller round a loop that
+        # cannot reach message bodies.
+        assert "fewer keywords" not in hint
+
+    @pytest.mark.asyncio
+    @patch("apple_mail_mcp.server.execute_query_async")
+    async def test_jxa_fallback_with_results_still_returns_a_list(
+        self, mock_exec
+    ):
+        """The documented no-index fallback keeps working."""
+        mock_exec.return_value = [
+            {
+                "id": 7,
+                "subject": "Contract renewal",
+                "sender": "a@b.com",
+                "date_received": "2026-01-05T09:00:00",
+            }
+        ]
+
+        with patch("apple_mail_mcp.server._get_index_manager") as mock_get:
+            mock_get.return_value = self._manager(has_index=False)
+
+            from apple_mail_mcp.server import search
+
+            result = await search("renewal")
+
+        assert isinstance(result, list)
+        assert result[0]["id"] == 7
+
+    @pytest.mark.asyncio
+    async def test_body_scope_without_index_raises(self):
+        """Body search has no live fallback — it must not pretend."""
+        with patch("apple_mail_mcp.server._get_index_manager") as mock_get:
+            mock_get.return_value = self._manager(has_index=False)
+
+            from apple_mail_mcp.server import search
+
+            with pytest.raises(ValueError, match="Body search") as excinfo:
+                await search("quarterly", scope="body")
+
+        message = str(excinfo.value)
+        assert "index.db" in message
+        assert "apple-mail-mcp index" in message
+        assert "Full Disk Access" in message
+
+    @pytest.mark.asyncio
+    async def test_attachments_scope_without_index_raises(self):
+        """Attachment names live only in the index."""
+        with patch("apple_mail_mcp.server._get_index_manager") as mock_get:
+            mock_get.return_value = self._manager(has_index=False)
+
+            from apple_mail_mcp.server import search
+
+            with pytest.raises(ValueError, match="Attachment") as excinfo:
+                await search("invoice.pdf", scope="attachments")
+
+        assert "apple-mail-mcp index" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_empty_index_is_not_reported_as_no_match(self):
+        """An index holding 0 emails is a build failure, not a miss."""
+        manager = self._manager(has_index=True, is_empty=True)
+        manager.search.return_value = []
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_map,
+        ):
+            mock_get.return_value = manager
+            mock_map.return_value = self._account_map()
+
+            from apple_mail_mcp.server import search
+
+            result = await search("renewal")
+
+        assert result["result"] == []
+        assert "0 emails" in result["hint"]
+        assert "apple-mail-mcp index" in result["hint"]
+        assert "fewer keywords" not in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_genuine_zero_match_keeps_the_keyword_hint(self):
+        """#99's hint is untouched on the path it was written for."""
+        manager = self._manager(has_index=True, is_empty=False)
+        manager.search.return_value = []
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_map,
+        ):
+            mock_get.return_value = manager
+            mock_map.return_value = self._account_map()
+
+            from apple_mail_mcp.server import search
+
+            result = await search("xyznonexistent123")
+
+        assert result["result"] == []
+        assert "fewer keywords" in result["hint"]
+        assert "apple-mail-mcp index" not in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_unreadable_index_reports_the_access_problem(self):
+        """sqlite reports a denied open as a generic error."""
+        import sqlite3
+
+        manager = self._manager(has_index=True)
+        manager.search.side_effect = sqlite3.OperationalError(
+            "unable to open database file"
+        )
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_map,
+        ):
+            mock_get.return_value = manager
+            mock_map.return_value = self._account_map()
+
+            from apple_mail_mcp.server import search
+
+            with pytest.raises(RuntimeError) as excinfo:
+                await search("renewal")
+
+        message = str(excinfo.value)
+        assert "index.db" in message
+        assert "readable" in message
+
+    @pytest.mark.asyncio
+    async def test_other_index_errors_keep_the_rebuild_advice(self):
+        """Unrelated failures are not recast as permission problems."""
+        import sqlite3
+
+        manager = self._manager(has_index=True)
+        manager.search.side_effect = sqlite3.DatabaseError(
+            "database disk image is malformed"
+        )
+
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch("apple_mail_mcp.server._get_account_map") as mock_map,
+        ):
+            mock_get.return_value = manager
+            mock_map.return_value = self._account_map()
+
+            from apple_mail_mcp.server import search
+
+            with pytest.raises(RuntimeError, match="rebuild") as excinfo:
+                await search("renewal")
+
+        assert "malformed" in str(excinfo.value)
+
+
+class TestDiskPermissionErrors:
+    """A denied .emlx read must name the FDA cause, not lie (#109).
+
+    Without the PermissionError wrap, get_email_attachment reported
+    an existing attachment as "not found" and get_email_links
+    reported "no links" — while the metadata paths (which need no
+    Full Disk Access) list both correctly.
+    """
+
+    def _manager(self):
+        from pathlib import Path
+
+        mock_manager = MagicMock()
+        mock_manager.has_index.return_value = True
+        mock_manager.find_email_path.return_value = Path("/fake/42.emlx")
+        return mock_manager
+
+    @pytest.mark.asyncio
+    async def test_attachment_permission_error_names_fda(self):
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch(
+                "apple_mail_mcp.server.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_thread,
+        ):
+            mock_get.return_value = self._manager()
+            # First to_thread call is the best-effort cache cleanup
+            # (its error is swallowed); second is the actual read.
+            mock_thread.side_effect = PermissionError(
+                "[Errno 1] Operation not permitted: '/fake/42.emlx'"
+            )
+
+            from apple_mail_mcp.server import get_email_attachment
+
+            with pytest.raises(RuntimeError, match="Full Disk Access"):
+                await get_email_attachment(42, "invoice.pdf")
+
+    @pytest.mark.asyncio
+    async def test_attachment_permission_error_is_not_not_found(self):
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch(
+                "apple_mail_mcp.server.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_thread,
+        ):
+            mock_get.return_value = self._manager()
+            mock_thread.side_effect = PermissionError("denied")
+
+            from apple_mail_mcp.server import get_email_attachment
+
+            with pytest.raises(RuntimeError) as excinfo:
+                await get_email_attachment(42, "invoice.pdf")
+            assert "not found" not in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_links_permission_error_names_fda(self):
+        with (
+            patch("apple_mail_mcp.server._get_index_manager") as mock_get,
+            patch(
+                "apple_mail_mcp.server.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_thread,
+        ):
+            mock_get.return_value = self._manager()
+            mock_thread.side_effect = PermissionError("denied")
+
+            from apple_mail_mcp.server import get_email_links
+
+            with pytest.raises(RuntimeError, match="Full Disk Access"):
+                await get_email_links(42)

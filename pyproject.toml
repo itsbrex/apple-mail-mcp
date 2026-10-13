@@ -1,6 +1,6 @@
 [project]
 name = "apple-mail-mcp"
-version = "0.4.2"
+version = "0.5.0"
 description = "Apple Mail MCP server with full-coverage FTS5 body search. Reliable on large mailboxes where AppleScript-based servers timeout."
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -36,6 +36,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Email",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
