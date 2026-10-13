@@ -306,7 +306,8 @@ class TestMigrationV3ToV4:
         conn.close()
 
     def test_migration_adds_attachment_count_column(self, v3_db):
-        _run_migrations(v3_db, 3, SCHEMA_VERSION)
+        # This assertion belongs to v4; v6 intentionally clears old rows.
+        _run_migrations(v3_db, 3, 4)
 
         # attachment_count should exist and default to 0
         cursor = v3_db.execute(
@@ -402,7 +403,8 @@ class TestMigrationV4ToV5:
         assert cursor.fetchone() is not None
 
     def test_migration_preserves_existing_data(self, v4_db):
-        _run_migrations(v4_db, 4, SCHEMA_VERSION)
+        # v5 preserves rows; the separate v6 migration invalidates them.
+        _run_migrations(v4_db, 4, 5)
 
         cursor = v4_db.execute(
             "SELECT subject FROM emails WHERE message_id = 1"

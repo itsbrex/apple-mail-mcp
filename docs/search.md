@@ -74,12 +74,43 @@ The `account` column stores filesystem UUIDs (e.g., `24E569DF-5E45-...`), not fr
 
 Instead, translation happens at search time via `AccountMap` (`index/accounts.py`), which maps names to UUIDs using JXA's `Mail.accounts.id()`. The mapping is cached for 5 minutes and seeded automatically on the first `list_accounts()` call or on any `get_emails()`/`search()` call that passes an `account=` argument. Subsequent calls within the TTL are served from the in-process cache with no JXA round-trip.
 
+### Nested Mailbox Filters
+
+The index stores full paths such as `[Gmail]/Spam` and `Projects/Invoices`.
+Indexed search resolves `mailbox` against paths in the requested account,
+after removing excluded accounts:
+
+1. An exact full path wins, ignoring case and NFC/NFD Unicode differences.
+2. Otherwise, a parent such as `[Gmail]` selects its indexed descendants.
+   The separator matters: `[Gmail]` never matches `[Gmailish]/Spam`.
+3. Otherwise, a unique leaf such as `Invoices` selects `Projects/Invoices`.
+4. Multiple matching leaves raise an error with copyable `mailbox="full/path"`
+   choices. Supply one full path to retry.
+
+If distinct stored paths normalize to the same spelling, use the exact stored
+path from the error. Identity operations never silently union those paths.
+
+`exclude_mailboxes` uses the same order but unions ambiguous leaves rather
+than raising. These rules apply to normal search, highlighting, result counts,
+and attachment filename search. Unknown names match nothing. Original stored
+spelling is returned in results.
+
+Single-message index lookups, deletes, and scoped rebuilds use exact paths
+or unique leaves only; they never expand a parent into its descendants.
+Live JXA mailbox resolution and disk/watcher indexing exclusions retain their
+existing behavior; these rules describe indexed queries.
+
+Schema v6 clears the old email cache, attachment metadata, and sync timestamps
+once so the next writer sync can rebuild full paths from disk. Mail.app
+messages and parse-failure history are preserved. The rebuilding process needs
+Full Disk Access; until it succeeds, indexed search may report an empty index.
+
 ## Database Schema
 
 The index uses SQLite with FTS5 external content tables:
 
 ```sql
--- Email content cache (schema v5)
+-- Email content cache (schema v6)
 CREATE TABLE emails (
     rowid INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id INTEGER NOT NULL,

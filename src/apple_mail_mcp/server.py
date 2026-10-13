@@ -55,6 +55,7 @@ from .executor import (
     execute_query_async,
     execute_with_core_async,
 )
+from .index.mailboxes import AmbiguousMailboxError
 
 mcp = FastMCP("Apple Mail")
 
@@ -808,12 +809,15 @@ async def get_email(
 
             idx_acct = None
             if account is not None:
-                idx_acct = acct_map.name_to_uuid(account)
+                idx_acct = acct_map.name_to_uuid(account) or account
 
             excluded_uuids = acct_map.names_to_uuids(_excluded_account_names())
 
             emlx_path = manager.find_email_path(
-                message_id, account=idx_acct, mailbox=mailbox
+                message_id,
+                account=idx_acct,
+                mailbox=mailbox,
+                exclude_accounts=sorted(excluded_uuids),
             )
             if emlx_path:
                 # A stale index row (account excluded after indexing,
@@ -850,7 +854,7 @@ async def get_email(
                         return _enrich_attachments(result)
                 else:
                     stale_index_entry = (idx_acct, mailbox)
-    except _AccountHiddenError:
+    except (_AccountHiddenError, AmbiguousMailboxError):
         raise
     except Exception:
         logger.debug(
@@ -909,12 +913,15 @@ async def get_email(
 
             idx_acct = None
             if account is not None:
-                idx_acct = acct_map.name_to_uuid(account)
+                idx_acct = acct_map.name_to_uuid(account) or account
             idx_mb = mailbox
             excluded_uuids = acct_map.names_to_uuids(_excluded_account_names())
 
             location = manager.find_email_location(
-                message_id, account=idx_acct, mailbox=idx_mb
+                message_id,
+                account=idx_acct,
+                mailbox=idx_mb,
+                exclude_accounts=sorted(excluded_uuids),
             )
             if location:
                 idx_account, idx_mailbox = location
@@ -937,7 +944,7 @@ async def get_email(
                     raise
                 except Exception:
                     pass  # Fall through to strategy 3
-    except _AccountHiddenError:
+    except (_AccountHiddenError, AmbiguousMailboxError):
         raise
     except Exception:
         pass  # Index unavailable, fall through
@@ -1033,7 +1040,10 @@ async def _resolve_emlx_path(
         idx_acct = acct_map.name_to_uuid(account) or account
 
     emlx_path = manager.find_email_path(
-        message_id, account=idx_acct, mailbox=mailbox
+        message_id,
+        account=idx_acct,
+        mailbox=mailbox,
+        exclude_accounts=sorted(excluded_uuids),
     )
     if not emlx_path:
         raise ValueError(f"Email {message_id} not found in index.")
@@ -1399,6 +1409,8 @@ async def search(
                     offset=offset,
                     highlight=highlight,
                 )
+            except AmbiguousMailboxError:
+                raise
             except Exception as e:
                 raise RuntimeError(_search_index_error(manager, e)) from e
             return _maybe_hint(

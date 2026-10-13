@@ -68,13 +68,14 @@ pipx upgrade apple-mail-mcp
 
 **Cause:** Schema changes between versions (e.g., v0.1.3 added attachment metadata in schema v4; v0.3.0 added the failed-parse DLQ in schema v5). Migrations are forward-only and run automatically; a manual rebuild is only needed if existing rows lack new columns (attachments, paths).
 
-**Fix:**
+Schema v6 intentionally clears cached rows with old, collapsed mailbox
+identities. The next writer sync rebuilds full paths automatically. If that
+sync cannot access Mail.app's files, grant Full Disk Access to the launching
+app, then restart the server or run `apple-mail-mcp index`. Mail.app messages
+and parse-failure history are preserved.
 
-```bash
-apple-mail-mcp rebuild
-```
-
-This drops and recreates the index from scratch.
+**Fix for other stale index data:** run `apple-mail-mcp rebuild` to recreate
+the index from disk.
 
 ## Config File Errors (v0.4.0+)
 

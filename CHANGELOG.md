@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Preserve full nested mailbox paths in disk and watcher indexing (#107,
+  parser by Markus Klingspor). Indexed search resolves exact paths, parent
+  subtrees, then unique leaf names with case-insensitive Unicode matching.
+  Ambiguous leaves return copyable full-path choices; search exclusions union
+  ambiguous matches. Identity lookups and deletes never expand subtrees.
+- Scoped index rebuilds retain unrelated mailbox rows instead of clearing
+  the whole index. Schema v6 invalidates old collapsed identities and sync
+  timestamps once; the next writer sync re-indexes from disk. This changes
+  only the search cache, not messages in Mail.app. Parse-failure history stays.
+
 ## [0.5.0] - 2026-09-12
 
 ### Added

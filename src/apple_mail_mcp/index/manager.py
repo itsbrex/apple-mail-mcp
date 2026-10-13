@@ -28,6 +28,11 @@ from ..config import (
     get_index_path,
     get_index_staleness_hours,
 )
+from .mailboxes import (
+    indexed_mailboxes,
+    mailbox_predicate,
+    resolve_for_identity,
+)
 from .schema import (
     INSERT_EMAIL_SQL,
     init_database,
@@ -650,21 +655,45 @@ class IndexManager:
         self._require_writer("rebuild")
         conn = self._get_conn()
 
-        # Delete existing entries for rebuild scope
-        if account and mailbox:
+        if account or mailbox:
+            where: list[str] = []
+            params: list = []
+            self._add_identity_filter(where, params, account, mailbox)
             conn.execute(
-                "DELETE FROM emails WHERE account = ? AND mailbox = ?",
-                (account, mailbox),
+                "DELETE FROM emails WHERE " + " AND ".join(where), params
             )
-        elif account:
-            conn.execute("DELETE FROM emails WHERE account = ?", (account,))
-        else:
-            conn.execute("DELETE FROM emails")
+            conn.commit()
+            # The full builder clears every row. Reconcile scoped removals
+            # instead so unrelated mailboxes retain their indexed content.
+            return self.sync_updates(progress_callback)
 
-        conn.commit()
-
-        # Rebuild from disk
         return self.build_from_disk(progress_callback)
+
+    def _add_identity_filter(
+        self,
+        where: list[str],
+        params: list,
+        account: str | None,
+        mailbox: str | None,
+        prefix: str = "",
+        exclude_accounts: list[str] | None = None,
+    ) -> None:
+        """Use the same exact-path resolution for all identity queries."""
+        if account:
+            where.append(f"{prefix}account = ?")
+            params.append(account)
+        if exclude_accounts:
+            placeholders = ", ".join("?" for _ in exclude_accounts)
+            where.append(f"{prefix}account NOT IN ({placeholders})")
+            params.extend(exclude_accounts)
+        if mailbox:
+            paths = indexed_mailboxes(
+                self._get_conn(), account, exclude_accounts
+            )
+            resolved = resolve_for_identity(mailbox, paths)
+            where.append(
+                mailbox_predicate(f"{prefix}mailbox", resolved, params)
+            )
 
     def get_indexed_message_ids(
         self, account: str | None = None, mailbox: str | None = None
@@ -683,16 +712,13 @@ class IndexManager:
         """
         conn = self._get_conn()
 
-        if account and mailbox:
-            sql = """SELECT message_id FROM emails
-                     WHERE account = ? AND mailbox = ?"""
-            cursor = conn.execute(sql, (account, mailbox))
-        elif account:
-            cursor = conn.execute(
-                "SELECT message_id FROM emails WHERE account = ?", (account,)
-            )
-        else:
-            cursor = conn.execute("SELECT message_id FROM emails")
+        where = ["1=1"]
+        params: list = []
+        self._add_identity_filter(where, params, account, mailbox)
+        cursor = conn.execute(
+            "SELECT message_id FROM emails WHERE " + " AND ".join(where),
+            params,
+        )
 
         return {row[0] for row in cursor}
 
@@ -705,6 +731,8 @@ class IndexManager:
         message_id: int,
         account: str | None = None,
         mailbox: str | None = None,
+        *,
+        exclude_accounts: list[str] | None = None,
     ) -> tuple[str, str] | None:
         """Look up an email's (account, mailbox) from the index.
 
@@ -715,6 +743,7 @@ class IndexManager:
             message_id: Mail.app message ID
             account: Optional account filter (UUID)
             mailbox: Optional mailbox filter
+            exclude_accounts: Account UUIDs hidden from lookup and candidates
 
         Returns:
             (account, mailbox) tuple or None if not found
@@ -722,12 +751,9 @@ class IndexManager:
         conn = self._get_conn()
         where = ["message_id = ?"]
         params: list = [message_id]
-        if account:
-            where.append("account = ?")
-            params.append(account)
-        if mailbox:
-            where.append("mailbox = ?")
-            params.append(mailbox)
+        self._add_identity_filter(
+            where, params, account, mailbox, exclude_accounts=exclude_accounts
+        )
 
         sql = (
             "SELECT account, mailbox FROM emails WHERE "
@@ -744,6 +770,8 @@ class IndexManager:
         message_id: int,
         account: str | None = None,
         mailbox: str | None = None,
+        *,
+        exclude_accounts: list[str] | None = None,
     ) -> Path | None:
         """Look up an email's .emlx file path from the index.
 
@@ -753,6 +781,7 @@ class IndexManager:
             message_id: Mail.app message ID
             account: Optional account filter (UUID)
             mailbox: Optional mailbox filter
+            exclude_accounts: Account UUIDs hidden from lookup and candidates
 
         Returns:
             Path to the .emlx file, or None if not found / path is NULL
@@ -760,12 +789,9 @@ class IndexManager:
         conn = self._get_conn()
         where = ["message_id = ?"]
         params: list = [message_id]
-        if account:
-            where.append("account = ?")
-            params.append(account)
-        if mailbox:
-            where.append("mailbox = ?")
-            params.append(mailbox)
+        self._add_identity_filter(
+            where, params, account, mailbox, exclude_accounts=exclude_accounts
+        )
 
         sql = (
             "SELECT emlx_path FROM emails WHERE "
@@ -810,12 +836,7 @@ class IndexManager:
         conn = self._get_conn()
         where = ["message_id = ?"]
         params: list = [message_id]
-        if account:
-            where.append("account = ?")
-            params.append(account)
-        if mailbox:
-            where.append("mailbox = ?")
-            params.append(mailbox)
+        self._add_identity_filter(where, params, account, mailbox)
 
         sql = "DELETE FROM emails WHERE " + " AND ".join(where)
         cursor = conn.execute(sql, params)
@@ -933,12 +954,7 @@ class IndexManager:
         conn = self._get_conn()
         where = ["e.message_id = ?"]
         params: list = [message_id]
-        if account:
-            where.append("e.account = ?")
-            params.append(account)
-        if mailbox:
-            where.append("e.mailbox = ?")
-            params.append(mailbox)
+        self._add_identity_filter(where, params, account, mailbox, prefix="e.")
 
         sql = (
             "SELECT a.filename, a.mime_type, a.file_size, a.content_id "

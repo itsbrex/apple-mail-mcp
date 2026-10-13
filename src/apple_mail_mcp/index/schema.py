@@ -17,7 +17,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Current schema version for migrations
-SCHEMA_VERSION = 5  # Bumped for failed_index_jobs (DLQ) support
+SCHEMA_VERSION = 6  # Full nested mailbox paths replace collapsed identities
 
 # Default PRAGMAs for all connections (centralized to avoid drift)
 DEFAULT_PRAGMAS = {
@@ -439,6 +439,18 @@ def _run_migrations(
                 ON failed_index_jobs(account, mailbox);
         """)
         logger.info("Migration v4→v5 complete.")
+
+    if from_version < 6 <= to_version:
+        # Collapsed mailbox identities may already have overwritten rows.
+        # Invalidate the cache, including its sync timestamps, so the next
+        # writer sync re-parses disk paths. Keep parse-failure history.
+        logger.info(
+            "Migrating schema v5→v6: clearing cached emails for nested "
+            "mailbox paths; the next sync will rebuild them from disk"
+        )
+        conn.execute("DELETE FROM attachments")
+        conn.execute("DELETE FROM emails")
+        conn.execute("DELETE FROM sync_state")
 
     conn.execute("UPDATE schema_version SET version = ?", (to_version,))
     conn.commit()

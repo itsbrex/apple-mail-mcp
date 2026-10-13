@@ -16,7 +16,7 @@ src/apple_mail_mcp/
 ├── executor.py         # run_jxa(), execute_with_core(), execute_query()
 ├── index/              # FTS5 search index module
 │   ├── __init__.py     # Exports IndexManager
-│   ├── schema.py       # SQLite schema v5 (DLQ + attachments)
+│   ├── schema.py       # SQLite schema v6 (full mailbox paths)
 │   ├── lock.py         # IndexLock — cross-process single-writer flock (#106)
 │   ├── accounts.py     # AccountMap — account name↔UUID cache
 │   ├── envelope_direct.py  # Direct Envelope Index SQLite reads (get_emails fast path)
@@ -24,6 +24,7 @@ src/apple_mail_mcp/
 │   ├── disk.py         # .emlx reading + get_disk_inventory()
 │   ├── sync.py         # Disk-based state reconciliation
 │   ├── search.py       # FTS5 search functions
+│   ├── mailboxes.py    # Shared search / identity mailbox resolvers
 │   └── watcher.py      # Real-time file watcher
 └── jxa/
     ├── __init__.py     # Exports MAIL_CORE_JS
@@ -174,7 +175,7 @@ reply_to, message_id from MIME headers.
 
 ## FTS5 Search Index
 
-### Database Schema (v5)
+### Database Schema (v6)
 
 ```sql
 -- Email content cache

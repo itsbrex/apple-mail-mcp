@@ -188,7 +188,7 @@ JXA is the only way to get **real-time state** from Mail.app. Disk files reflect
 
 We maintain a separate SQLite database (`~/.apple-mail-mcp/index.db`) with an [FTS5](https://www.sqlite.org/fts5.html) virtual table for full-text search. This is what makes body search possible in ~2ms instead of requiring JXA to iterate every email.
 
-### Schema (v5)
+### Schema (v6)
 
 ```sql
 -- Email content cache

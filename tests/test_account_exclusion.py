@@ -176,7 +176,7 @@ class TestDiskWalkExclusion:
 
 
 class TestSearchFilter:
-    def test_clause_is_case_sensitive_uuid_match(self):
+    def test_clause_is_case_sensitive_uuid_match(self, temp_db):
         from apple_mail_mcp.index.search import add_account_mailbox_filter
 
         params: list = []
@@ -186,6 +186,7 @@ class TestSearchFilter:
             account=None,
             mailbox=None,
             exclude_accounts=["UUID-P", "UUID-Q"],
+            conn=temp_db,
         )
         # No LOWER() wrapping (case-sensitive), values bound as-is.
         assert "account NOT IN (?, ?)" in sql
@@ -480,7 +481,9 @@ class TestResolveEmlxPath:
             def has_index(self):
                 return True
 
-            def find_email_path(self, message_id, account=None, mailbox=None):
+            def find_email_path(
+                self, message_id, account=None, mailbox=None, **kwargs
+            ):
                 return emlx
 
         async def _no_jxa(self):
@@ -506,7 +509,9 @@ class TestResolveEmlxPath:
             def has_index(self):
                 return True
 
-            def find_email_path(self, message_id, account=None, mailbox=None):
+            def find_email_path(
+                self, message_id, account=None, mailbox=None, **kwargs
+            ):
                 return emlx
 
         monkeypatch.setenv("APPLE_MAIL_INDEX_EXCLUDE_ACCOUNTS", "PHI")

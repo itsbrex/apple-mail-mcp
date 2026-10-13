@@ -19,6 +19,12 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from .mailboxes import (
+    indexed_mailboxes,
+    mailbox_predicate,
+    resolve_for_search,
+)
+
 # Characters that make a bare FTS5 token dangerous
 # (hyphens = NOT, colons = column filter, parens = grouping, etc.)
 _HAS_SPECIAL = re.compile(r"['\-\(\)\:\^]")
@@ -128,6 +134,7 @@ def add_account_mailbox_filter(
     exclude_mailboxes: list[str] | None = None,
     exclude_accounts: list[str] | None = None,
     *,
+    conn: sqlite3.Connection,
     before: str | None = None,
     after: str | None = None,
 ) -> str:
@@ -147,6 +154,7 @@ def add_account_mailbox_filter(
         exclude_accounts: Optional list of account UUIDs to exclude.
             Matched case-sensitively (the `account` column stores
             UUIDs; callers resolve display names -> UUIDs upstream).
+        conn: Connection used to resolve indexed mailbox paths once
         before: Exclude emails on/after this date (YYYY-MM-DD)
         after: Include emails on/after this date (YYYY-MM-DD)
 
@@ -156,13 +164,27 @@ def add_account_mailbox_filter(
     if account:
         sql += f" AND {table_alias}.account = ?"
         params.append(account)
+    paths = (
+        indexed_mailboxes(conn, account, exclude_accounts)
+        if mailbox or exclude_mailboxes
+        else []
+    )
     if mailbox:
-        sql += f" AND LOWER({table_alias}.mailbox) = LOWER(?)"
-        params.append(mailbox)
+        resolved = resolve_for_search(mailbox, paths)
+        sql += " AND " + mailbox_predicate(
+            f"{table_alias}.mailbox", resolved, params
+        )
     if exclude_mailboxes:
-        placeholders = ", ".join("LOWER(?)" for _ in exclude_mailboxes)
-        sql += f" AND LOWER({table_alias}.mailbox) NOT IN ({placeholders})"
-        params.extend(exclude_mailboxes)
+        excluded = sorted(
+            {
+                name
+                for value in exclude_mailboxes
+                for name in resolve_for_search(value, paths, exclude=True)
+            }
+        )
+        sql += " AND " + mailbox_predicate(
+            f"{table_alias}.mailbox", excluded, params, exclude=True
+        )
     if exclude_accounts:
         placeholders = ", ".join("?" for _ in exclude_accounts)
         sql += f" AND {table_alias}.account NOT IN ({placeholders})"
@@ -317,6 +339,7 @@ def search_fts(
         mailbox,
         exclude_mailboxes=exclude_mailboxes,
         exclude_accounts=exclude_accounts,
+        conn=conn,
         before=before,
         after=after,
     )
@@ -439,6 +462,7 @@ def search_fts_highlight(
         mailbox,
         exclude_mailboxes=exclude_mailboxes,
         exclude_accounts=exclude_accounts,
+        conn=conn,
         before=before,
         after=after,
     )
@@ -536,7 +560,7 @@ def count_matches(
     """
 
     params: list = [safe_query]
-    sql = add_account_mailbox_filter(sql, params, account, mailbox)
+    sql = add_account_mailbox_filter(sql, params, account, mailbox, conn=conn)
 
     try:
         cursor = conn.execute(sql, params)
@@ -593,6 +617,7 @@ def search_attachments(
         mailbox,
         exclude_mailboxes=exclude_mailboxes,
         exclude_accounts=exclude_accounts,
+        conn=conn,
         before=before,
         after=after,
     )
