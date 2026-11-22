@@ -78,6 +78,13 @@ def run_js(test: str, setup: str = "") -> None:
         ('saved.sender = () => "other@example.invalid";', None),
         ('saved.toRecipients = recipients(["other@invalid"]);', None),
         ('saved.content = () => {throw Error("gone");};', None),
+        # Both recipient reads fail: two failures must not compare equal.
+        (
+            'const gone = {name: () => {throw Error("gone");},'
+            " address: () => []};"
+            "outgoing.toRecipients = gone; saved.toRecipients = gone;",
+            None,
+        ),
     ],
 )
 def test_saved_reference_requires_unique_matching_mailbox_message(
@@ -174,4 +181,27 @@ def test_reply_body_failure_stops_before_save_or_send(result):
         "catch (error) {failure = String(error);}"
         'check(failure && failure.indexOf("nothing was sent") !== -1);',
         BRIDGE,
+    )
+
+
+def test_recipient_readers_differ_only_on_failure():
+    """get_email tolerates an unresolvable recipient list; compose does not.
+
+    ``getRecipients`` returns ``[]`` so one bad header cannot fail a
+    read. ``readRecipientsStrict`` throws, so a reply's recipient cap
+    and the saved-draft comparison never run on a partial list.
+    """
+    run_js(
+        'const ok = recipients(["a@example.invalid"]);'
+        'const gone = {name: () => {throw Error("gone");}, address: () => []};'
+        "const want = JSON.stringify("
+        '[{name: "Fixture", address: "a@example.invalid"}]);'
+        "check(JSON.stringify(MailCore.getRecipients({r: ok}, 'r')) === want);"
+        "check(JSON.stringify(MailCore.readRecipientsStrict({r: ok}, 'r'))"
+        " === want);"
+        "check(MailCore.getRecipients({r: gone}, 'r').length === 0);"
+        "let threw = false;"
+        "try { MailCore.readRecipientsStrict({r: gone}, 'r'); }"
+        " catch (_) { threw = true; }"
+        "check(threw);"
     )

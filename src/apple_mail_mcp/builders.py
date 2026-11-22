@@ -24,19 +24,6 @@ EMAIL_PROPERTIES = {
     "source": "source",  # Raw email source - expensive!
 }
 
-# Recipient collections belong to a single full-message read, not the
-# scalar properties fetched when listing a mailbox.
-RECIPIENT_PROPERTIES = {"to": "toRecipients", "cc": "ccRecipients"}
-
-
-def recipient_fields_js() -> str:
-    """Keep full-message recipient fields identical across JXA strategies."""
-    return "\n".join(
-        f'    {field}: MailCore.getRecipients(msg, "{prop}"),'
-        for field, prop in RECIPIENT_PROPERTIES.items()
-    )
-
-
 # Shorthand aliases for common property sets
 PROPERTY_SETS = {
     "minimal": ["id", "subject", "sender", "date_received"],
@@ -314,7 +301,8 @@ JSON.stringify({{
     flagged: msg.flaggedStatus(),
     reply_to: msg.replyTo(),
     message_id: msg.messageId(),
-{recipient_fields_js()}
+    to: MailCore.getRecipients(msg, "toRecipients"),
+    cc: MailCore.getRecipients(msg, "ccRecipients"),
     attachments: attachments
 }});
 """

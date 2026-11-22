@@ -81,6 +81,11 @@ async def test_confirm_is_only_reply_transmission_path():
     assert "msg.save()" not in script
     assert "MailCore.findSavedDraft" not in script
     assert "Too many recipients" in script
+    # The cap must count a complete recipient list: a tolerant read
+    # that returns [] for one failed field would undercount it.
+    for prop in ("toRecipients", "ccRecipients", "bccRecipients"):
+        assert f'MailCore.readRecipientsStrict(msg, "{prop}")' in script
+    assert "MailCore.getRecipients(msg" not in script
     assert script.index("MailCore.assertSenderAccount") < script.index(
         "msg.send()"
     )

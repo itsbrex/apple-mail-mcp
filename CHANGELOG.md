@@ -19,10 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with explicit unconfirmed readback otherwise. Disabled sender accounts are
   rejected before composing. CLI twins: `draft`, `reply`, `reply-draft`;
   `--body -` reads stdin. All tools expose MCP risk annotations.
-- **Full-email recipients.** `get_email` now returns structured `to` and `cc`
-  recipients on disk and every JXA fallback path, including decoded RFC 2047
-  display names. Empty headers produce empty lists.
-
 - **Global development launcher.** `just setup` now binds the global
   `apple-mail-mcp` command to the current checkout, with editable source and
   locked dependency sync on each launch. `just dev-link`, `just dev-status`,
@@ -40,10 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- **CLI commands no longer pay for `import fastmcp` (~1s).** `server.mcp` is now a small registry that records `@mcp.tool` / `@mcp.resource` at import and builds the real `FastMCP` on the first `run()` — the only caller that needs it. `import apple_mail_mcp.server` drops from ~2.0s to ~0.25s, so `apple-mail-mcp read` / `search` / `emails` are bounded by the actual work again. A test builds the real server in the suite and checks its roster against the decorators, so a tool signature fastmcp can't schema-ify still fails in CI rather than at `serve` time.
 - **`scripts/smoke.sh` reads an indexed message.** It used to read the newest message from `emails`, which is almost never in the index yet (no `serve` has synced), so the timing measured the JXA fallback walking the whole mailbox (~6–11s on a 5K-message INBOX) instead of the disk path it claims to exercise.
-- **Highlighted search no longer scales with the number of matches.** `search(..., highlight=True)` (the CLI `search` default) ran FTS5 `highlight()`/`snippet()` over *every* matching row before the `ORDER BY score LIMIT` pruned to one page — for a common term on a ~130K-row index that was 1.5–4s per query (`just smoke` measured `search` at ~5s). The highlight path now ranks and filters in a rowid-only subquery and runs the auxiliary functions only on the returned page: ~0.3s for the worst case, 2–6x faster on typical terms, unchanged on rare ones, with identical rows, order, and scores. The unary `+` on the outer rowid (`+emails_fts.rowid IN (...)`) is load-bearing — without it SQLite re-runs the MATCH once per result row.
-- **`get_email()` disk reads skip the JXA account-map load when nothing needs it.** With no `account` hint and no `APPLE_MAIL_INDEX_EXCLUDE_ACCOUNTS`, Strategy 0 needed the name↔UUID map for nothing, yet paid an `osascript` round-trip (~250ms cold) on every cold process — i.e. every CLI `read`. The map still loads whenever an account name or configured exclusions must be translated, so the hidden-account gate is unchanged. The remaining ~1s of CLI wall time is the `fastmcp` import.
 
 ### Changed
 
@@ -52,9 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Test jobs have a ten-minute execution timeout.
 
 - **Developer workflow overhaul** — `justfile` task runner (`just check` is the local mirror of CI), targeted `just test-changed`, opt-in git hooks (`just hooks`: staged-file ruff on commit, changed-file tests on push), `scripts/release.sh` collapsing the 4-step release checklist, `scripts/smoke.sh` for real-Mail.app verification, Claude Code project settings + skills (`.claude/`) and an `AGENTS.md` mirror for Codex. Test suite wall time drops from ~280s to ~3s: nine `test_manager.py` tests were walking the developer's real `~/Library/Mail`; a conftest guard now keeps the whole suite off it. `tests/` is in the ruff lint scope. New `tests/test_release_metadata.py` fails the build when `pyproject.toml`/`server.json` versions diverge, when the `CHANGELOG.md` lacks a section for the current version, or when the tool roster in `server.py` drifts from the counts and tables in README/CLAUDE.md/docs.
-- **Type checking is a gate.** `ty` (pinned in the dev group) runs in `just check` and CI after ruff; the 27 pre-existing diagnostics are fixed. `fastmcp` is bumped from `3.0.0b1` to `>=3.4.7` — the beta typed `@mcp.tool` as returning a `FunctionTool`, which made every direct call of a tool (the CLI, the deprecated `get_attachment` alias) a type error; 3.4 returns the decorated function. The CLI `--scope`/`--filter` options are now `Literal` types, so an invalid value is rejected at parse time with the list of choices instead of reaching the server.
 
 ### Fixed
+
+- **A sync that finds changes records the global sync checkpoint too.**
+  `sync_from_disk` stamped the `_global`/`_sync` marker only when a pass
+  found nothing to change, so on a busy mailbox the one record of a completed
+  full rescan never moved. It is now stamped after every pass.
 
 - **Release packaging stays in sync.** `just release` now validates and
   updates the plugin, marketplace plugin entry, and Claude Desktop bundle
@@ -63,7 +60,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Version mismatches fail before any file is rewritten; regression
   tests exercise the release commit and bundle filename in temporary repos.
 
-- **`date_received` from the `.emlx` plist footer was never used.** The fallback for a message whose headers carry no `Date` referenced `datetime.UTC` on the *class* (the constant lives on the module), raised `AttributeError` inside a best-effort `except Exception`, and silently left `date_received` empty. Surfaced by the type checker. (`index/disk.py`)
+## [0.5.1] - 2026-11-16
+
+### Added
+
+- **`get_email()` returns `to` and `cc`.** Each is a list of `{name, address}`, from every read strategy: the disk path parses the To/Cc MIME headers (repeated headers merged, RFC 2047 names decoded), and the JXA paths read them from Mail.app, returning `[]` if Mail cannot resolve them. Bcc is left out; it is absent on received mail. By itsbrex. (#129)
+- **Every tool declares MCP tool annotations**, so clients and gateways can classify a tool without guessing from its name: `readOnlyHint=true`, `destructiveHint=false`, `idempotentHint=true`, `openWorldHint=true`. The hints are advisory and sit alongside the read-only and hidden-account gates. By itsbrex. (#129)
+
+### Changed
+
+- **Highlighted search ranks first and highlights only the returned page.** SQLite evaluated FTS5 `highlight()`/`snippet()` for every matching row before `LIMIT` pruned them, so a broad term re-tokenized most of the index on each call. Rows, order and scores are unchanged; broad-term searches measured 1.9–2.1 s now take 0.4–0.7 s, typical terms run 2–6x faster. By itsbrex. (#117)
+- **CLI commands start without importing fastmcp.** The server builds its FastMCP instance on first run, which takes importing it for a CLI command from about 2.0 s to 0.25 s. `get_email()` also skips the Mail.app account lookup when there is no account hint and no exclusions configured (about 250 ms cold). By itsbrex. (#117)
+- **fastmcp ≥ 3.4.7 is required** (was ≥ 3.0.0b1). The lock moves starlette from 0.52 to 1.6 with it; if you pin starlette yourself alongside this package, 1.x is what resolves. (#118)
+- **`ty` type-checks `src/` in CI**, pinned to 0.0.73, and CI installs with `uv sync --locked` so a `pyproject.toml` change that leaves `uv.lock` behind fails the build. (#118)
+
+### Fixed
+
+- **Messages with no usable `Date` header get their received date from the `.emlx` plist.** The fallback read `datetime.UTC` off the `datetime` class, where it does not exist; the `AttributeError` was swallowed by the best-effort plist handler, so those messages were indexed with an empty date. The fallback uses the module-level `UTC`, with a regression test. Found by itsbrex while making the type checker a gate. (#118)
+- **The index build no longer carries a dead Envelope Index overlay.** `scan_all_emails()` tried to read Apple's Envelope Index for per-message metadata, but looked one directory above where Mail keeps it, so the lookup failed silently on every machine and the build always fell back to `.emlx` parsing. Had the path been correct, the overlay would have produced timestamps 31 years in the future, `imap:` as the account name, percent-encoded mailbox names, and integer row ids as subject and sender — and the next sync, which derives identity from the file path, would have deleted and re-inserted every row to undo it. The overlay and its helpers are removed; the build parses `.emlx` files alone, and `envelope_direct.py` remains the single Envelope Index reader, serving `get_emails()`. Diagnosis by InfiniteSemicolon. (#127)
 
 ## [0.5.0] - 2026-09-12
 

@@ -9,8 +9,13 @@
 const Mail = Application("Mail");
 
 const MailCore = {
-    /** Read one message's recipients with two batched property fetches. */
-    getRecipients(message, property) {
+    /**
+     * Read one message's recipients, throwing if Mail cannot resolve them.
+     * Compose readback uses this: a failed read must leave a draft
+     * unconfirmed, and must not compare equal to another failed read.
+     * get_email uses the tolerant getRecipients() below instead.
+     */
+    readRecipientsStrict(message, property) {
         const recipients = message[property];
         const names = recipients.name();
         const addresses = recipients.address();
@@ -111,7 +116,7 @@ end fillReply`;
             const subject = message.subject();
             const body = message.content();
             const sender = MailCore.senderAddress(message.sender());
-            const addresses = (msg, prop) => MailCore.getRecipients(msg, prop)
+            const addresses = (msg, prop) => MailCore.readRecipientsStrict(msg, prop)
                 .map(r => r.address.toLowerCase()).sort().join("\n");
             const props = ["toRecipients", "ccRecipients", "bccRecipients"];
             const expected = props.map(prop => addresses(message, prop));
@@ -290,6 +295,28 @@ end fillReply`;
     getMessageById(messageId) {
         // Messages are referenced by ID across all accounts
         return Mail.messages.byId(messageId);
+    },
+
+    /**
+     * Read one message's recipients with two batched property fetches.
+     * Best-effort like attachment metadata: [] if Mail.app can't
+     * resolve them, so a recipient read never fails the whole fetch.
+     * @param {Message} message - Mail message
+     * @param {string} property - "toRecipients" or "ccRecipients"
+     * @returns {Object[]} Array of {name, address}
+     */
+    getRecipients(message, property) {
+        try {
+            const recipients = message[property];
+            const names = recipients.name();
+            const addresses = recipients.address();
+            return addresses.map((address, i) => ({
+                name: names[i] || "",
+                address: address || "",
+            }));
+        } catch (e) {
+            return [];
+        }
     },
 
     /**

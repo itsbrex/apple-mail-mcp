@@ -56,7 +56,7 @@ The first line is an ASCII integer indicating the exact byte length of the MIME 
 
 The core email data. This is a standard MIME message identical to what you'd find in an `.eml` file. We parse it with Python's built-in [`email.message_from_bytes()`](https://docs.python.org/3/library/email.parser.html), which handles:
 
-- **Headers** — `From`, `Subject`, `Date`, `Message-ID`, `Reply-To`, `Content-Type`
+- **Headers** — `From`, `To`, `Cc`, `Subject`, `Date`, `Message-ID`, `Reply-To`, `Content-Type`
 - **Body** — `text/plain` preferred, `text/html` fallback (converted to text via [BeautifulSoup](https://www.crummy.com/software/BeautifulSoup/bs4/doc/))
 - **Attachments** — MIME parts with `Content-Disposition: attachment` or inline images with `Content-ID`
 - **Encoding** — RFC 2047 encoded headers decoded via `email.header.decode_header()`
@@ -254,7 +254,7 @@ CREATE TABLE failed_index_jobs (
 
 ### Why Not Use Apple's Envelope Index?
 
-Mail.app maintains its own SQLite database at `~/Library/Mail/V*/MailData/Envelope Index`. We read it for metadata during indexing (`disk.py:read_envelope_index()`), but we don't use it for search because:
+Mail.app maintains its own SQLite database at `~/Library/Mail/V*/MailData/Envelope Index`. We read it for `get_emails()` listings (`envelope_direct.py`), where it is the fastest path to metadata, but the index build parses `.emlx` files alone and we don't use it for search because:
 
 1. **No FTS5** — it has basic indexes but no full-text search capability
 2. **Schema instability** — Apple changes the schema across macOS versions without documentation

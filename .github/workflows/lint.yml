@@ -27,7 +27,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --frozen --group dev
+      - run: uv sync --locked --group dev
       - run: uv run --frozen ruff check src/ tests/
       - run: uv run --frozen ruff format --check src/ tests/
       - run: uv run --frozen ty check src/
@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
-      - run: uv sync --frozen --group dev
+      - run: uv sync --locked --group dev
       # --durations surfaces any test that starts walking real disk
       # again (the suite is ~3s; one slow test stands out immediately).
       - run: uv run --frozen pytest -q --durations=5 --durations-min=1.0
@@ -63,5 +63,5 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-      - run: uv sync --frozen --group dev
+      - run: uv sync --locked --group dev
       - run: uv run --frozen pytest -q --durations=5 --durations-min=1.0

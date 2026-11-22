@@ -12,6 +12,7 @@ src/apple_mail_mcp/
 ├── cli.py              # CLI commands (index, status, rebuild, serve)
 ├── server.py           # FastMCP server with 14 MCP tools
 ├── config.py           # Environment variable configuration
+├── choices.py          # Filter/scope Literals shared by server and CLI
 ├── builders.py         # QueryBuilder, AccountsQueryBuilder
 ├── executor.py         # run_jxa(), execute_with_core(), execute_query()
 ├── index/              # FTS5 search index module
@@ -166,7 +167,8 @@ Strategy 3: Iterate all mailboxes ← slowest, always works (with timeout)
 
 All strategies return identical response schema. Strategy 0 extracts read/flagged
 from plist footer flags bitmask (bit 0 = read, bit 4 = flagged) and date_sent,
-reply_to, message_id and structured to/cc recipients from MIME headers.
+reply_to, message_id and to/cc recipients (`[{name, address}]`) from MIME
+headers. JXA strategies read recipients via `MailCore.getRecipients()`.
 
 ### Design Patterns
 
@@ -287,7 +289,6 @@ from apple_mail_mcp.index.disk import (
     scan_all_emails,          # Iterator over all emails (with content)
     get_disk_inventory,       # Fast walk, NO content parsing → dict
     iter_disk_inventory,      # Streaming variant → generator (added v0.3.0)
-    read_envelope_index,      # Query metadata DB
 )
 
 # Fast inventory (for sync)
