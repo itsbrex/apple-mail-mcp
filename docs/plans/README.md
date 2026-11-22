@@ -7,7 +7,7 @@ offline-ready, approve/reject/edit-able, numbered per repo.
 
 ```bash
 bun run plans            # interactive picker (fzf if installed, else numbered)
-bun run plans latest     # open the newest plan (highest #seq)
+bun run plans latest     # open the newest plan (highest #seq), or an app page edited after it
 bun run plans <substr>   # open first plan whose filename matches <substr>
 open docs/plans/index.html   # dashboard (auto-regenerated each session; also https://<appName>.localhost/plans/)
 ```
@@ -24,6 +24,9 @@ bun run plans new <slug> --title "Title" --source "where this came from"
 Stamps `YYYY-MM-DD-NNN-<slug>.html` from `.plan-template.html` with the next
 sequence number and this repo's accent color, then rebuilds the dashboard.
 Fill in the thesis paragraph and `PLAN_ITEMS` (see `DESIGN.md`).
+Both stock and Mono use the mobile review flow: section cards, one decision at
+a time, Hold / Change / Approve, full source text, local progress and retryable
+Send. Exporting a copy does not claim delivery. Only a valid inbox receipt does.
 
 Since v16 stamping is context-aware (a title or source containing quotes or
 tags can neither break nor inject into the page), `plans new` takes a sequence
@@ -31,17 +34,39 @@ lock so two sessions never mint the same `#NNN`, and every page carries a
 random submission token the decision listener must see (see `DESIGN.md`,
 "Receiving decisions"). Tests: `node --test ~/.claude/templates/plans/tests/*.test.mjs`.
 
-Plan pages (v13) carry a 13-entry theme system — default **Auto** resolves to
-Cresa goldenrod on dark systems, paper on light; **Repo accent** restores the
-stamped per-repo color — plus a persisted Motion toggle. Both live on the
+Plan pages carry a 14-entry theme system (v39). New viewers start on
+**Mono**, and a theme saved under `plan-ui` always wins. **Auto** stays in the
+list and resolves to Cresa goldenrod on dark systems, paper on light. **Cresa
+dark** uses the Cresa skills' dark tokens (`#0A0A0A` page, `#161616` cards,
+Goldenrod `#FFB600`). **Repo accent** restores the stamped per-repo color.
+A persisted Motion toggle sits beside the theme button. Both live on the
 toolbar and are shared across the browser origin via the `plan-ui`
 localStorage key; repos on the shared hub hostname share these UI preferences.
 Stock plans honor the OS reduced-motion preference as of v29.
 
+## Mobile review and device testing (v45)
+
+Stock and Mono share safe-area layouts, touch-sized controls, readable phone
+inputs, reduced motion, and modal focus loops. Closing a dialog restores focus
+without moving the page. Completed-decision confirmation returns to Send when
+auto-advance has replaced the original approval button. Existing authored pages
+and saved decisions are preserved by the normal provenance upgrade guards.
+
+```bash
+bun run plans mobile-test --url http://MAC_LAN_IP:5173 --out ./artifacts/mobile
+```
+
+This delegates to AppKit's reusable physical Safari harness. Keep the phone
+connected and unlocked; use a phone-reachable URL and an isolated test fixture.
+The harness saves device evidence and closes its own session. It needs no Xcode
+project or signed runner app. See
+`~/.claude/templates/appkit/docs/MOBILE-DEVICE-TESTING.md` for custom flows,
+one-time Safari prerequisites, and separate VoiceOver/software-keyboard checks.
+
 ## App skeletons — owned by appkit, not by this folder
 
 ```bash
-bun run plans app <slug> [--title "Title"] [--badge "TAG"] [--dest dir] [--recipe workspace|records|qa-review|review]
+bun run plans app <slug> [--title "Title"] [--badge "TAG"] [--dest dir] [--recipe workspace|records|qa-review|review|changes]
 appkit new <slug> --recipe workspace          # the same thing, direct
 ```
 
@@ -58,23 +83,28 @@ appkit migrate apps/<slug>.html   # apply it via 3-way merge, keeping your edits
 appkit doctor                     # integrity, drift, and context-hygiene checks
 ```
 
-Two recipes today:
+Five recipes are available:
 
-- **`workspace`** (default) — 100dvh flex column, pinned footer, one isolated
-  scroll region, file/drag/paste intake, stat tiles, item list, source drawer,
-  download/copy/offline-ZIP export. The shape the Font Swap app hand-rolled.
-- **`records`** — sortable table + grouped board over a `DATA` array, KPI tiles,
-  filter chips, search, record drawer, CSV export. Byte-compatible with the old
-  `.app-template.html`.
+- **`workspace`** (default): file, drag and paste intake; one scroll region;
+  source sheet; copy, download and offline ZIP export.
+- **`records`**: searchable and sortable records, grouped board, phone cards,
+  record details and CSV export. Empty fields follow the current data policy.
+- **`review`**: evidence cards/table, source details, filters and JSON/CSV export.
+  Read-only report with System, Light and Dark themes.
+- **`qa-review`**: screenshot intake, carousel, annotations, saved notes and
+  verdicts, portable HTML and JSON exports.
+- **`changes`**: contribution charts, commit cards, branches, local decisions
+  and JSON export. No listener or remote writes.
 
-Both ship the shared shell: embedded Geist Sans/Mono/Pixel (fully offline),
-12 switchable themes incl. Cresa goldenrod — default Auto resolves goldenrod on
-dark systems, paper on light (`t` cycles; live preview in the command bar) —
-⌘K/⌘; fuzzy command bar with a Motion setting, confirm modal, toast stack,
-drawer, and a keyboard layer where each overlay owns its keys.
+AppKit keeps Geist, Cresa goldenrod and paper palettes; phone controls use the
+system font. Sheets respect safe areas, controls support touch and keyboard,
+and OS reduced motion takes priority. See `appkit recipes` for exact
+capabilities. The Records and Changes fallback files are generated from the
+same recipes with `node ~/.claude/templates/appkit/tools/build-plans-mirrors.mjs`.
 
 `--template <name>` still uses the old copy-a-file path for named variants that
-have not been ported to a recipe yet (e.g. `--template changes`). As of hook v9
+have not been ported to a recipe yet. `--template changes` forwards to the
+Changes recipe. As of hook v9
 this folder no longer receives `.app-template*.html` copies; if your repo still
 has them, they are leftovers — `appkit doctor` lists them.
 
@@ -104,8 +134,8 @@ owns it. Without portless or the agent, pages simply keep opening from
 
 Turn remote access on once per machine and the hub answers a tunnel host with
 a keyed, path-prefixed mirror of every repo: `/` lists what is waiting on you,
-`/<appName>/plans/<file>.html` is the page itself, and Submit posts back to the
-same origin. `bun run plans wait <slug>` then texts you the link.
+`/<appName>/plans/<file>` (no `.html`; the old `.html` form redirects) is the
+page itself, and Submit posts back to the same origin. `bun run plans wait <slug>` then texts you the link.
 
 ```bash
 bun run plans hub remote on --provider cloudflare --tunnel-name plans-hub --hostname plans.cresa.dev
@@ -123,7 +153,8 @@ Details, security model and the per-page ENDPOINT rewrite: `DESIGN.md`
 
 With a publish Site set, `bun run plans wait <slug>` first copies the plan to
 that Site. It then checks the link card and texts you the Site link, for
-example `https://plans.cresa.one/<appName>/003-<slug>.html`. If the publish
+example `https://plans.cresa.one/<appName>/003-<slug>` (links never end in
+`.html`; the `.html` URL still opens the same page). If the publish
 fails, `wait` exits with code 3 and texts nothing.
 
 ```bash
@@ -159,6 +190,11 @@ Any server that backs an HTML page/app in this repo MUST be started through
   fallback for direct runs), bind `process.env.HOST` when set, and when
   auto-opening a browser prefer `process.env.PORTLESS_URL`. NEVER hardcode a
   port number in code, scripts, or docs.
+- **Safe replacement:** re-running replaces only the exact app hostname under
+  the active proxy's TLD. `--keep` refuses replacement. If the previous owner
+  cannot shut down gracefully within five seconds, the wrapper exits without
+  starting another server; it never force-kills an owner and leaves its detached
+  server behind.
 - **package.json:** wire app scripts through the wrapper, e.g.
   `"web": "bun scripts/plans.mjs serve bun web/server.ts"`.
 - Cross-service refs: `portless get <name>`. No portless installed? The wrapper

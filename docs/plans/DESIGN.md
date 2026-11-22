@@ -1,14 +1,48 @@
-# Design — Interactive Plan Pages (v2)
+# Design — Interactive Plan Pages (v45)
 
 System doc for the self-contained HTML plan/decision pages under `docs/plans/`.
 A plan page is a single offline `.html` file the reader **acts on**: every
 decision item can be approved, rejected, or edited in place, then submitted
 back to Claude for execution.
 
-Reader context: a developer on a laptop reviewing proposals — approving some,
-rewording others — in a dim room at night or a bright cafe by day. The page must
+Reader context: someone reviewing proposals on a phone or laptop — approving
+some, changing others, holding unresolved items. The page must
 stay legible in glare, dense without sprawling, and every action must feel
 instant.
+
+## Current mobile review contract (v45)
+
+Stock and Mono share the same decision flow and transport. The sections below
+include historical implementation notes; this contract describes new output.
+
+- Start with section cards, then review one decision at a time. Phone actions
+  stay within the safe area. Sources remain selectable and readable.
+- Use **Hold**, **Change**, and **Approve**. Hold remains `rejected` in the JSON
+  contract for compatibility. Unanswered items remain `pending`.
+- Editing or reverting approved text clears its approval. Changing any source
+  or proposal clears saved choices while preserving reader edits for review.
+- Optional `PLAN_CONTEXT = {label, text, revision}` embeds the full packet.
+  Optional `item.source = {path, label, text}` embeds an item's full source.
+  Text is rendered safely; neither field fetches remote content.
+- Progress uses the existing repository/token-scoped storage key. Preserve
+  stable item IDs and submission tokens when explicitly updating a page.
+- **Send** supports partial reviews. Success requires a JSON response with
+  `ok: true` and a nonempty `inbox`. Login HTML, network failure or malformed
+  receipts leave choices editable, with retry and an explicit JSON export.
+- **Export a copy** is a local handoff file, not a delivery acknowledgment.
+- New stock pages default to Mono; saved theme choices win. The Mono variant
+  offers System, Dark and Light. OS reduced motion overrides optional motion;
+  keyboard input immediately stops any animation already running.
+- `viewport-fit=cover` enables safe-area padding. Phone inputs use at least
+  16px; zoom stays enabled. Verify notches, software keyboards and touch feel
+  on real hardware before claiming device validation.
+- Dialogs isolate background focus, loop forward/reverse Tab, and restore focus
+  to the actual invoker, including Safari touch. Keep every side of focus rings
+  inside clipped containers; never hide a ring to avoid clipping.
+- `bun run plans mobile-test --url URL --out DIR` delegates to the shared
+  AppKit physical-Safari harness. See
+  `~/.claude/templates/appkit/docs/MOBILE-DEVICE-TESTING.md` for reusable flows,
+  setup and the separate native keyboard/picker/VoiceOver checks.
 
 ## Creating a page (required workflow)
 
@@ -122,8 +156,8 @@ Reader affordances (v11–v16, already wired in the template — do not remove):
   `role=dialog aria-modal`, skip link, visible focus rings, and a persisted
   Motion: Reduced toggle (`html[data-motion=reduced]`) that kills all
   animation.
-- **Theme + Motion toolbar buttons** (v13) — cycle the 13-entry theme list /
-  toggle motion; both persist under the shared `plan-ui` localStorage key.
+- **Theme + Motion toolbar buttons** (v13) — cycle the 14-entry theme list
+  (v39) / toggle motion; both persist under the shared `plan-ui` localStorage key.
 - **Submit to Claude** POSTs the full decision payload to the always-on
   **plans hub** at `https://<appName>.localhost/plans/_submit` (v17). The page
   itself is served from that origin when the hub is up (`bun run plans latest`
@@ -197,6 +231,10 @@ Rules that cost a session each to learn:
 
 - **Flat files only.** cresa.one does not serve a folder's `index.html`.
   `/x/` redirects to `/x`, which answers 404. Pages must be `<NNN>-<slug>.html`.
+- **Links leave out `.html` (v38).** cresa.one answers `/<appName>/<NNN>-<slug>`
+  with the flat `<NNN>-<slug>.html` file, so the texted link, `canonical`,
+  `og:url`, and the Site landing rows all use the URL without the extension.
+  The `.html` URL keeps working for links sent before v38.
 - **The mirror is the whole Site.** A publish replaces every file on the Site,
   so the mirror holds pages from all repos. Never publish a single page
   directory to the Site.
@@ -223,8 +261,10 @@ The same hub process answers any **non-`.localhost` Host** — a Tailscale
 `serve` name, a Tailscale Funnel, an ngrok or cloudflared tunnel — with
 path-prefixed routing: `/` is a review-all landing page (every registered
 repo's plans, "waiting for you" first), `/_pending` the same as JSON, and
-`/<appName>/plans/<file>.html`, `/<appName>/apps/<file>.html`,
-`/<appName>/plans/_ping|_submit` mirror the local routes. Every remote request
+`/<appName>/plans/<file>`, `/<appName>/apps/<file>`,
+`/<appName>/plans/_ping|_submit` mirror the local routes. Remote links never
+carry `.html` (hub v25): a remote request for `<file>.html` answers 308 to the
+same path without it, query kept. Local `.localhost` URLs serve both forms. Every remote request
 needs the shared key in `~/.claude/plans-hub/hub.config.json` (`remote.secret`):
 the texted link carries `?key=…` once, the hub answers with an HttpOnly cookie
 (90 days) and redirects without the key. `.localhost` hosts never need it.
@@ -258,7 +298,7 @@ bun run plans hub remote on --provider cloudflare    # public cloudflared quick 
 bun run plans hub remote status|off
 bun run plans hub notify set --channel imessage --to <phone or Apple ID email> [--transport osascript|imsg] [--preview on|off]
 bun run plans notify --test                          # text yourself a link now
-bun run plans hub url --remote                       # this repo's keyed remote URL
+bun run plans hub url --remote                       # this repo's remote URL, key hidden (--show-key prints it)
 ```
 
 **Lifecycle: stamped → submitted → implemented.** Submitted = an inbox file
@@ -281,7 +321,8 @@ page) carries Open Graph tags — `og:title` (seq stripped), `og:description`
 (repo · date · waiting/submitted), `og:url`, and an `og:image` card
 (1200×630, repo accent bar, seq pill, status badge; rendered once per page
 version with headless Chromium into `~/.claude/plans-hub/og/<app>/`, served at
-`/<app>/plans/_og/<file>.png?key=…`). A keyed **GET** is served directly with
+`/<app>/plans/_og/<file>.png?key=…`, where `<file>` has no `.html`; the
+pre-v25 `_og/<file>.html.png` still answers). A keyed **GET** is served directly with
 the cookie attached (no redirect) so LinkPresentation, which follows no
 cookies, still sees the real page. iMessage only unfurls a message that is a
 bare URL, so notifications go out as: summary text, then each link as its own
@@ -372,10 +413,11 @@ Bun.serve({ port, hostname: "127.0.0.1", async fetch(req) {
       const raw = await readLimited(req);
       let slug = "unknown";
       try { slug = JSON.parse(raw)?.plan?.slug ?? "unknown"; } catch {}
-      if (slug !== EXPECTED.slug) {   // another plan's payload — save aside, stay alive
-        await Bun.write(`${OUT}.foreign-${slug.replace(/[^a-z0-9-]/g, "_")}.json`, raw);
+      // Another plan's payload: stay alive and keep nothing. Its token is not
+      // this listener's, so it cannot be checked, and nothing unchecked is
+      // written. The page answers {ok:false} by saving its JSON download.
+      if (slug !== EXPECTED.slug)
         return Response.json({ok:false, reason:"wrong-plan", plan:EXPECTED.slug}, {headers:CORS});
-      }
       if (!authorized(req)) return new Response("unauthorized", {status:401, headers:CORS});
       const payload = validatePayload(JSON.parse(raw));
       const temp = `${OUT}.${randomUUID()}.tmp`;
@@ -404,15 +446,42 @@ elevated surfaces separated by lightness + hairline borders, never drop
 shadow. No gradient backgrounds, no gradient text, no glassmorphism.
 Precision-instrument feel: dense, legible, fast.
 
-**Default is Auto (system-aware):** dark systems resolve to **Goldenrod** (the
-Cresa house theme), light systems to **Paper**, via `prefers-color-scheme`,
-with a live change listener while Auto is selected. An explicit theme choice
-overrides the OS and persists. The plan template cycles 13 entries on the
-toolbar Theme button (Auto · Goldenrod · **Repo accent** · Mono · Graphite ·
-Phosphor · Amber · Ember · Cobalt · Violet · Jade · Rose · Paper), persisted
-under the shared `plan-ui` localStorage key so every plan page in a repo
-follows the same choice. **Repo accent** removes `data-theme` and restores the
-stamped per-repo accent on the base OLED palette. App shells (appkit ≥1.1.0
+**Default is Mono (v39).** A viewer with no saved theme starts on **Mono**
+(`PTHEME_DEFAULT` in the template). A theme saved under `plan-ui` always wins,
+so a browser that already stored a choice keeps it. The page saves the theme
+it applies on first load, so a browser that opened a plan before v39 has
+stored `auto` and stays on Auto until the viewer picks another theme.
+**Auto (system-aware)** stays in the list: dark systems resolve to
+**Goldenrod**, light systems to **Paper**, via `prefers-color-scheme`, with a
+live change listener while Auto is selected. The plan template cycles 14
+entries on the toolbar Theme button (Auto · Goldenrod · **Cresa dark** ·
+**Repo accent** · Mono · Graphite · Phosphor · Amber · Ember · Cobalt · Violet
+· Jade · Rose · Paper), persisted under the shared `plan-ui` localStorage key
+so every plan page in a repo follows the same choice. **Repo accent** removes
+`data-theme` and restores the stamped per-repo accent on the base OLED
+palette. The mono variant keeps its own three entries (System · Dark · Light)
+and its System default.
+
+**Cresa dark** (`data-theme=cresa`, v39) carries the Cresa skills' dark-mode
+tokens. `--ink-muted` is this page's body-copy role, so it takes Cresa body
+ink. `--ink-faint` takes Cresa muted. Danger, warn, focus and the kind-chip
+hues inherit `:root`; each clears 5.3:1 on every Cresa surface.
+
+| Token | Value | Cresa role | Contrast |
+| --- | --- | --- | --- |
+| `--bg` | `#0A0A0A` | page | |
+| `--surface-1` | `#161616` | card | |
+| `--surface-2` | `#1C1C1C` | raised surface, chip | |
+| `--surface-3` | `#222222` | derived step: buttons, inputs | |
+| `--hairline` | `#2C2C2C` | hairline | |
+| `--hairline-strong` | `#3A3A3A` | derived step: dialogs, toasts | |
+| `--ink` | `#FFFFFF` | headings, strong text | 18.1:1 on `#161616` |
+| `--ink-muted` | `#CFCFCF` | body ink | 11.6:1 on `#161616` |
+| `--ink-faint` | `#9A9A9A` | muted, labels, meta | 6.4:1 on `#161616` |
+| `--accent` | `#FFB600` | Goldenrod | 10.3:1 on `#161616` |
+| `--accent-ink` | `#001E5A` | Midnight on Goldenrod | 9.0:1 |
+
+App shells (appkit ≥1.1.0
 and the monolith app template) expose 12 themes in the command bar with live
 preview and on `t`; Paper darkens danger/warn/focus (and the plan template's
 kind-chip hues) for AA on light.

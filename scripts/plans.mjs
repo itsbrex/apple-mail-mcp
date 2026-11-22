@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// PLANS_TPL_VERSION: 32
+// PLANS_TPL_VERSION: 45
 // Plan-page toolchain for docs/plans/ — browse, create, and index interactive
 // HTML plan pages. Runs on `bun` (preferred, faster) or `node`.
 //
@@ -19,6 +19,8 @@
 //                                 # later with `appkit diff` / `appkit migrate`.
 //                                 # `--template <name>` still uses the legacy copy-a-file
 //                                 # path for variants not yet ported to a recipe.
+//   bun run plans mobile-test --url URL --out DIR [--device UDID] [--flow FILE]
+//                                 # physical iPhone Safari checks through the shared AppKit harness
 //   bun run plans index [--quiet] # regenerate docs/plans/index.html dashboard
 //   bun run plans serve [--name x] <cmd…>
 //                                 # run a dev/app server through portless: stable
@@ -83,6 +85,21 @@
 // line instead of metric tiles, no colored side borders, thumb-reach action bar
 // on phones, clearer status/submit copy, themed browser surfaces, an authored
 // send moment, and an axe-clean paper theme. Visual evidence in provenance/.
+// v39 (themes, 2026-11-11): the page template adds a "Cresa dark" theme
+// (#0A0A0A page, #161616 cards, Goldenrod #FFB600 with Midnight #001E5A ink)
+// and starts new viewers on Mono; a theme saved under plan-ui still wins.
+// No toolchain behavior changed here; the bump ships the template.
+// v38 (clean URLs, 2026-11-07): links to deployed pages leave out ".html":
+// the cresa.one Site page URL (texted link, canonical, og:url, Site landing
+// rows) and remote hub links. cresa.one serves `/<app>/<NNN>-<slug>` from the
+// flat `<NNN>-<slug>.html` file, and hub v25 serves `/<app>/plans/<file>` and
+// 308-redirects the old `.html` form. File names and local `.localhost` links
+// keep ".html" so the file:// dashboard still works.
+// v36 (serve + focus, 2026-10-13): replace only the exact active Portless
+// hostname, refuse replacement after a shutdown timeout, and retain visible
+// keyboard focus on published index rows.
+// v33 (notify, 2026-10-09): `plans wait` waits for each link's card, not just
+// its page, before texting; see warmPreviewCards.
 // v32 (docs, 2026-10-06): DESIGN.md says to start background waits as
 // `bun scripts/plans.mjs wait`, because token-saver ends `bun run …` tasks at 300 s.
 // v31 (publish, 2026-10-06): `plans wait` copies the plan to a cresa.one Site
@@ -109,7 +126,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
-import { existsSync, readFileSync, rmSync, watch as fsWatch, statSync } from 'node:fs';
+import { existsSync, readFileSync, watch as fsWatch, statSync } from 'node:fs';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
@@ -122,10 +139,15 @@ const ROOT = process.env.__PLANS_ROOT || path.resolve(fileURLToPath(new URL('..'
 const PLANS_DIR = path.join(ROOT, 'docs', 'plans');
 const CONFIG_PATH = path.join(PLANS_DIR, 'plans.config.json');
 const TEMPLATE_PATH = path.join(PLANS_DIR, '.plan-template.html');
+// Plan numbers have three digits (`<date>-<NNN>-<slug>.html`, `<NNN>-<slug>` on the Site).
+const MAX_PLAN_SEQ = 999;
 const SEQUENCE_LOCK_PATH = path.join(PLANS_DIR, '.plans-sequence.lock');
 const SEQUENCE_LOCK_OWNER_PATH = path.join(SEQUENCE_LOCK_PATH, 'owner.json');
 const SEQUENCE_LOCK_TIMEOUT_MS = Number(process.env.__PLANS_LOCK_TIMEOUT_MS || 10_000);
 const SEQUENCE_LOCK_STALE_MS = Number(process.env.__PLANS_LOCK_STALE_MS || 60_000);
+// Tests only: pause after seeing a stale lock, and hold a lock that was just taken.
+const LOCK_TEST_PAUSE_MS = Number(process.env.__PLANS_LOCK_TEST_PAUSE_MS || 0);
+const LOCK_TEST_HOLD_MS = Number(process.env.__PLANS_LOCK_TEST_HOLD_MS || 0);
 
 // High-contrast accents on true black (OKLCH). One is chosen at random per repo.
 const ACCENTS = [
@@ -163,19 +185,25 @@ function legacyLiteral(value) {
     .replace(/\u2028/g, '&#8232;').replace(/\u2029/g, '&#8233;');
 }
 
+// One pass over the template. Text that a value puts in is not looked at
+// again, so a title or a source line that holds a placeholder's name stays
+// plain text (replacing one placeholder after the other let it be filled in,
+// outside its escaping). Longer names first: one name can begin like another.
 function replaceLiterals(template, replacements) {
-  return Object.entries(replacements).reduce(
-    (page, [placeholder, value]) => page.replaceAll(placeholder, () => String(value)),
-    template,
-  );
+  const names = Object.keys(replacements).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (names.length === 0) return template;
+  const pattern = new RegExp(names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  return template.replace(pattern, name => String(replacements[name]));
 }
 
 function stampAppTemplate(template, values) {
-  return Object.entries(values).reduce((page, [key, value]) => replaceLiterals(page, {
-    [`__APP_${key}_HTML__`]: escapeHtml(value),
-    [`__APP_${key}_JSON__`]: jsLiteral(value),
-    [`__APP_${key}__`]: legacyLiteral(value),
-  }), template);
+  const replacements = {};
+  for (const [key, value] of Object.entries(values)) {
+    replacements[`__APP_${key}_HTML__`] = escapeHtml(value);
+    replacements[`__APP_${key}_JSON__`] = jsLiteral(value);
+    replacements[`__APP_${key}__`] = legacyLiteral(value);
+  }
+  return replaceLiterals(template, replacements);
 }
 
 async function writeConfig(cfg) {
@@ -224,68 +252,196 @@ async function readLockOwner(ownerPath = SEQUENCE_LOCK_OWNER_PATH) {
   }
 }
 
-async function retireSequenceLock(expectedToken, reason, lockPath = SEQUENCE_LOCK_PATH) {
-  const quarantine = `${lockPath}.${reason}-${randomBytes(8).toString('hex')}`;
+/* The lock is a directory. It can be taken over after a crash without ever
+   touching another process's lock, because every step acts on a file name
+   that belongs to one owner only:
+
+     <lock>/owner-<token>.json            the owner. The lock is held while this file is there.
+     <lock>/owner.json                    the same record, under the name that copies of this
+                                          tool from before v41 read.
+     <lock>/reaping-<token>-<id>.json     a dead owner's lock, being cleared by process <id>.
+
+   A lock is taken by renaming a ready-made directory onto the path. That
+   works only when the path is free or holds an empty directory, so a lock is
+   never there without its owner. A dead owner's lock is cleared by renaming
+   that owner's own file: one process wins the rename, and a process that
+   looked at an earlier lock finds no file of that name and changes nothing.
+   Nothing is ever removed by a name that a later lock could also have. */
+const LOCK_OWNER_FILE = /^owner-([a-f0-9]{32})\.json$/;
+const LOCK_REAPING_FILE = /^reaping-([a-f0-9]{32}|legacy)-([a-f0-9]{32})\.json$/;
+const lockSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function readLockRecord(file) {
   try {
-    await fs.rename(lockPath, quarantine);
+    const record = JSON.parse(await fs.readFile(file, 'utf8'));
+    return record && Number.isInteger(record.pid) ? record : null;
   } catch (error) {
-    if (error.code === 'ENOENT') return false;
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR' || error instanceof SyntaxError) return null;
     throw error;
   }
-  const movedOwner = await readLockOwner(path.join(quarantine, 'owner.json'));
-  if (expectedToken && movedOwner?.token !== expectedToken) {
-    throw new Error('Sequence lock ownership changed during release');
+}
+
+function lockRecord(extra = {}) {
+  return JSON.stringify({ pid: process.pid, processIdentity: processIdentity(process.pid), createdAt: new Date().toISOString(), ...extra }) + '\n';
+}
+
+// What is at the lock path now.
+async function inspectLock(lockPath) {
+  let names;
+  try {
+    names = await fs.readdir(lockPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { state: 'free' };
+    throw error;
   }
-  await fs.rm(quarantine, { recursive: true, force: true });
+  if (names.length === 0) return { state: 'free' };
+  const owned = names.map(name => name.match(LOCK_OWNER_FILE)).find(Boolean);
+  if (owned) return { state: 'held', name: owned[0], token: owned[1] };
+  const reaping = names.map(name => name.match(LOCK_REAPING_FILE)).find(Boolean);
+  if (reaping) return { state: 'reaping', name: reaping[0], token: reaping[1] };
+  return { state: 'legacy' };
+}
+
+// Take the lock: a new directory with the owner in it, renamed onto the path.
+async function takeSequenceLock(lockPath, token) {
+  const fresh = `${lockPath}.new-${token}-${randomBytes(4).toString('hex')}`;
+  const record = lockRecord({ token });
+  await fs.mkdir(fresh, { mode: 0o700 });
+  try {
+    await fs.writeFile(path.join(fresh, `owner-${token}.json`), record, { flag: 'wx', mode: 0o600 });
+    await fs.writeFile(path.join(fresh, 'owner.json'), record, { flag: 'wx', mode: 0o600 });
+    await fs.rename(fresh, lockPath);
+    return true;
+  } catch (error) {
+    await fs.rm(fresh, { recursive: true, force: true });
+    // The path holds a directory that is not empty: someone has the lock.
+    if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') return false;
+    throw error;
+  }
+}
+
+async function releaseSequenceLock(lockPath, token) {
+  const own = path.join(lockPath, `owner-${token}.json`);
+  // Taken over (this process looked dead to another one): nothing here is this process's to touch.
+  if (!existsSync(own)) return;
+  await fs.rm(path.join(lockPath, 'owner.json'), { force: true });
+  await fs.rm(own, { force: true });
+  await fs.rmdir(lockPath).catch(() => {});
+}
+
+// Clear a dead owner's lock. `from` is the one file that names what was seen:
+// the dead owner's own file, or the file of a reaper that died half-way.
+// Returns true when something may have changed and the caller should look again.
+async function reapSequenceLock(lockPath, token, from) {
+  const id = randomBytes(16).toString('hex');
+  const mine = path.join(lockPath, `reaping-${token}-${id}.json`);
+  try {
+    await fs.rename(path.join(lockPath, from), mine);
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return true; // another process got there first
+    throw error;
+  }
+  // While this file is in the directory, no new lock can take the path.
+  // Say who is reaping, so that others wait for a live reaper and replace a dead one.
+  let handle;
+  try {
+    handle = await fs.open(mine, 'r+');
+    await handle.truncate(0);
+    await handle.write(lockRecord({ reaping: token }), 0);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error; // ENOENT: taken over already; the other reaper finishes
+  } finally {
+    await handle?.close();
+  }
+  await fs.rm(path.join(lockPath, 'owner.json'), { force: true });
+  await fs.rm(mine, { force: true });
   return true;
 }
 
-async function acquireSequenceLock(lockPath = SEQUENCE_LOCK_PATH) {
-  const ownerPath = path.join(lockPath, "owner.json");
+// A lock from a copy of this tool before v41 (or one made by hand): a
+// directory with `owner.json` and no file named after its owner. The only name
+// to act on is `owner.json`, which a newer lock has too, so what was renamed
+// is checked and put back when it was not the lock that was seen.
+async function reapLegacyLock(lockPath, expectedToken) {
+  const id = randomBytes(16).toString('hex');
+  const mine = path.join(lockPath, `reaping-legacy-${id}.json`);
+  const compat = path.join(lockPath, 'owner.json');
+  let moved = false;
+  try {
+    await fs.rename(compat, mine);
+    moved = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+  }
+  const now = await inspectLock(lockPath);
+  if (!moved) {
+    // No owner record at all. An empty directory is free; anything else is looked at again.
+    return true;
+  }
+  const record = await readLockRecord(mine);
+  if (now.state === 'held' || (record?.token ?? null) !== (expectedToken ?? null)) {
+    // Not the lock that was seen: a live lock took the path in between. Give it its record back.
+    await fs.rename(mine, compat).catch(() => {});
+    return true;
+  }
+  let handle;
+  try {
+    handle = await fs.open(mine, 'r+');
+    await handle.truncate(0);
+    await handle.write(lockRecord({ reaping: 'legacy' }), 0);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  } finally {
+    await handle?.close();
+  }
+  await fs.rm(mine, { force: true });
+  return true;
+}
+
+// Returns true when the lock may be free now, false when a live process has it.
+async function clearDeadSequenceLock(lockPath) {
+  const view = await inspectLock(lockPath);
+  if (view.state === 'free') return true;
+  const stale = async (file) => {
+    try { return Date.now() - (await fs.stat(file)).mtimeMs > SEQUENCE_LOCK_STALE_MS; }
+    catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false; throw error; }
+  };
+  if (view.state === 'held') {
+    const file = path.join(lockPath, view.name);
+    if (!(await stale(file)) || lockOwnerIsAlive(await readLockRecord(file))) return false;
+    if (LOCK_TEST_PAUSE_MS) await lockSleep(LOCK_TEST_PAUSE_MS);
+    return reapSequenceLock(lockPath, view.token, view.name);
+  }
+  if (view.state === 'reaping') {
+    // A live reaper finishes in a moment. A dead one is replaced, by its own file name.
+    if (lockOwnerIsAlive(await readLockRecord(path.join(lockPath, view.name)))) return false;
+    return reapSequenceLock(lockPath, view.token, view.name);
+  }
+  const owner = await readLockOwner(path.join(lockPath, 'owner.json'));
+  if (!(await stale(lockPath)) || lockOwnerIsAlive(owner)) return false;
+  if (LOCK_TEST_PAUSE_MS) await lockSleep(LOCK_TEST_PAUSE_MS);
+  return reapLegacyLock(lockPath, owner?.token ?? null);
+}
+
+async function acquireSequenceLock(lockPath = SEQUENCE_LOCK_PATH, timeoutMs = SEQUENCE_LOCK_TIMEOUT_MS) {
   await fs.mkdir(path.dirname(lockPath), { recursive: true });
   const started = Date.now();
-  const token = randomBytes(18).toString('base64url');
-  const identity = processIdentity(process.pid);
+  const token = randomBytes(16).toString('hex');
   while (true) {
-    try {
-      await fs.mkdir(lockPath, { mode: 0o700 });
-      await fs.writeFile(ownerPath, JSON.stringify({
-        pid: process.pid,
-        processIdentity: identity,
-        token,
-        createdAt: new Date().toISOString(),
-      }) + '\n', { flag: 'wx', mode: 0o600 });
+    if ((await inspectLock(lockPath)).state === 'free' && await takeSequenceLock(lockPath, token)) {
+      if (LOCK_TEST_HOLD_MS) await lockSleep(LOCK_TEST_HOLD_MS);
       let released = false;
       return async () => {
         if (released) return;
         released = true;
-        const owner = await readLockOwner(ownerPath);
-        if (owner?.token !== token) return;
-        await retireSequenceLock(token, 'release', lockPath);
+        await releaseSequenceLock(lockPath, token);
       };
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      try {
-        const [stat, owner] = await Promise.all([
-          fs.stat(lockPath),
-          readLockOwner(ownerPath),
-        ]);
-        if (
-          Date.now() - stat.mtimeMs > SEQUENCE_LOCK_STALE_MS &&
-          !lockOwnerIsAlive(owner)
-        ) {
-          await retireSequenceLock(owner?.token, 'stale', lockPath);
-          continue;
-        }
-      } catch (statError) {
-        if (statError.code === 'ENOENT') continue;
-        throw statError;
-      }
-      if (Date.now() - started >= SEQUENCE_LOCK_TIMEOUT_MS) {
-        throw new Error(`Timed out waiting for ${lockPath}`);
-      }
-      await new Promise(resolve => setTimeout(resolve, 25));
     }
+    if (await clearDeadSequenceLock(lockPath)) continue;
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`Timed out waiting for ${lockPath}`);
+    }
+    await lockSleep(25);
   }
 }
 
@@ -472,12 +628,53 @@ async function listBrowsable() {
   return [...plans, ...apps];
 }
 
+// `plans latest`. Among numbered plans the latest is the highest number,
+// whatever was edited last: an edit to an older plan must not take the
+// shortcut over. Apps and pages without a number have no order of their own,
+// so they are compared with that one plan by edit time.
+function latestItem(items) {
+  const top = items.filter(item => item.seq != null).reduce((best, item) => (best === null || item.seq > best.seq ? item : best), null);
+  const candidates = [...items.filter(item => item.seq == null), ...(top ? [top] : [])];
+  return candidates.reduce((newest, item) => item.mtime > newest.mtime ? item : newest);
+}
+
 
 /* ---------------- plans hub (v17) ---------------- */
 const HUB_DIR = process.env.PLANS_HUB_DIR || path.join(os.homedir(), '.claude', 'plans-hub');
 const HUB_CONFIG_PATH = path.join(HUB_DIR, 'hub.config.json');
 const HUB_REGISTRY_PATH = path.join(HUB_DIR, 'registry.json');
 const HUB_INBOX_DIR = path.join(HUB_DIR, 'inbox');
+// v41 send targets: the page's Send sheet picks which bot acts on a submission.
+// The hub (v27+) writes inbox/@<target>/<app>/<slug>-NNN.json for a targeted
+// send and inbox/<app>/<slug>-NNN.json for an untargeted one (older pages).
+// `plans wait` reads its own target folder plus the untargeted one, so two
+// bots waiting on the same plan never both pick up one send.
+const SEND_TARGETS = ['claude', 'codex', 'muse', 'grok'];
+function targetInboxDir(app, target) { return target ? path.join(HUB_INBOX_DIR, `@${target}`, app) : path.join(HUB_INBOX_DIR, app); }
+// Newest submission for a plan across the untargeted and every target folder
+// (status, done and the landing page follow the latest send, whoever it was for).
+function inboxPath(app, keyJson) {
+  let best = path.join(HUB_INBOX_DIR, app, keyJson), bestAt = -1;
+  for (const t of [null, ...SEND_TARGETS]) {
+    const f = path.join(targetInboxDir(app, t), keyJson);
+    try { const m = statSync(f).mtimeMs; if (m > bestAt) { best = f; bestAt = m; } } catch {}
+  }
+  return best;
+}
+// --target claude|codex|muse|grok|none, else PLANS_TARGET, else Claude Code
+// (CLAUDECODE=1) -> claude, Codex (CODEX_THREAD_ID / CODEX_SANDBOX) -> codex,
+// else none (untargeted sends only, the pre-v41 behaviour).
+function waitTarget(flags) {
+  const raw = String(flags.target ?? process.env.PLANS_TARGET ?? '').trim().toLowerCase();
+  if (raw === 'none') return null;
+  if (raw) {
+    if (!SEND_TARGETS.includes(raw)) { console.error(`[plans wait] unknown --target "${raw}" (use ${SEND_TARGETS.join(', ')} or none)`); process.exit(1); }
+    return raw;
+  }
+  if (process.env.CLAUDECODE === '1') return 'claude';
+  if (process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX || process.env.CODEX_SANDBOX_NETWORK_DISABLED) return 'codex';
+  return null;
+}
 const HUB_SCRIPT = path.join(HUB_DIR, 'hub.ts');
 const HUB_LABEL = 'sh.claude.plans-hub';
 const HUB_PLIST_SRC = path.join(HUB_DIR, `${HUB_LABEL}.plist`);
@@ -651,7 +848,8 @@ async function cmdHub(argv) {
     if (argv.includes('--remote')) {
       const info = await remoteInfo();
       if (!info.live) { console.error(`[plans hub] remote is ${info.enabled ? 'not reachable' : 'off'}${info.reason ? ` (${info.reason})` : ''} — bun run plans hub remote on`); process.exit(1); }
-      console.log(remoteLink(info, `/${cfg.appName}/plans/`));
+      console.log(shownLink(remoteLink(info, `/${cfg.appName}/plans/`)));
+      keyHint();
       return;
     }
     console.log(`https://${cfg.appName}.localhost/plans/`);
@@ -686,6 +884,32 @@ async function cmdHub(argv) {
 /* ---------------- remote access + notifications (v19) ---------------- */
 async function hubConfig() { return readJsonOr(HUB_CONFIG_PATH, {}); }
 async function writeHubConfig(cfg) { await fs.mkdir(HUB_DIR, { recursive: true }); await writeJsonAtomic(HUB_CONFIG_PATH, cfg); try { await fs.chmod(HUB_CONFIG_PATH, 0o600); } catch {} }
+// Every change to hub.config.json goes through here: under one lock for the
+// whole hub (`<hub>/.hub-config.lock`), the file is read as it is now, `change`
+// edits that copy, and the copy is written. A command that read the config
+// earlier (and did slow work since) therefore changes only its own fields and
+// never writes back what it read: it cannot undo another command's change,
+// such as the proxy token a publish has just made. `writeHubConfig` is not
+// called anywhere else.
+const HUB_CONFIG_LOCK_PATH = path.join(HUB_DIR, '.hub-config.lock');
+async function updateHubConfig(change) {
+  await fs.mkdir(HUB_DIR, { recursive: true });
+  const release = await acquireSequenceLock(HUB_CONFIG_LOCK_PATH);
+  try {
+    const cfg = await hubConfig();
+    await change(cfg);
+    await writeHubConfig(cfg);
+    return cfg;
+  } finally {
+    await release();
+  }
+}
+// Set fields of `remote`. The proxy token and its fingerprint are left alone:
+// only syncProxyToken sets them.
+function setRemote(cfg, fields) {
+  const { proxyToken, proxyTokenSynced, ...rest } = fields || {};
+  cfg.remote = { ...(cfg.remote || {}), ...rest };
+}
 function tailscaleBin() {
   if (have('tailscale')) return 'tailscale';
   if (existsSync(TAILSCALE_APP_BIN)) return TAILSCALE_APP_BIN;
@@ -740,17 +964,27 @@ async function remoteInfo({ refresh = true } = {}) {
       if (!next) info.reason = `tunnel URL not in ${HUB_TUNNEL_LOG} yet`;
       else if (!tunnelLoaded()) info.reason = `tunnel agent ${HUB_TUNNEL_LABEL} is not loaded — bun run plans hub remote on`;
     }
-    if (next && next !== info.baseUrl) { info.baseUrl = next; cfg.remote = { ...r, baseUrl: next }; await writeHubConfig(cfg); }
+    if (next && next !== info.baseUrl) { info.baseUrl = next; await updateHubConfig(c => setRemote(c, { baseUrl: next })); }
   }
   info.live = !!info.baseUrl && !info.reason;
   return info;
 }
+// A hub link carries the shared key (`?key=...`). The link goes to the owner's
+// phone; what is printed to a terminal or a log has the key cut out.
+function redactKey(text) { return String(text).replace(/([?&]key=)[^&\s#"']+/g, '$1[redacted]'); }
+// A link that a command shows. What a command prints lands in terminal
+// scrollback and in an agent's transcript, so the key is hidden there too. The
+// owner gets the whole link by text (`plans notify --test`), or with --show-key.
+const SHOW_KEY = process.argv.includes('--show-key');
+function shownLink(url) { return SHOW_KEY ? url : redactKey(url); }
+function keyHint() { if (!SHOW_KEY) console.error('The key is hidden. Add --show-key to print the whole link, or text it to yourself: bun run plans notify --test'); }
 function remoteLink(info, p) { return `${info.baseUrl}${p}${p.includes('?') ? '&' : '?'}key=${encodeURIComponent(info.secret)}`; }
 function remotePathFor(file, appName) {
   const base = path.basename(file);
   const rel = path.relative(ROOT, file).split(path.sep).join('/');
-  if (rel === `docs/plans/${base}`) return `/${appName}/plans/${base}`;
-  if (rel === `apps/${base}` || rel === `docs/plans/apps/${base}`) return `/${appName}/apps/${base}`;
+  const clean = base.replace(/\.html$/i, '');
+  if (rel === `docs/plans/${base}`) return `/${appName}/plans/${clean}`;
+  if (rel === `apps/${base}` || rel === `docs/plans/apps/${base}`) return `/${appName}/apps/${clean}`;
   return null;
 }
 function tunnelPlist(provider, port) {
@@ -794,9 +1028,10 @@ async function hubRemote(argv) {
     if (!info.enabled) { console.log(`remote: off (${info.reason}) — bun run plans hub remote on [--provider tailscale|funnel|ngrok|cloudflare]`); return; }
     console.log(`remote: ${info.provider} · ${info.live ? 'live' : `not reachable — ${info.reason}`}`);
     if (info.baseUrl) {
-      console.log(`home:   ${remoteLink(info, '/')}`);
+      console.log(`home:   ${shownLink(remoteLink(info, '/'))}`);
       const mine = await loadConfig();
-      if (mine?.appName) console.log(`repo:   ${remoteLink(info, `/${mine.appName}/plans/`)}`);
+      if (mine?.appName) console.log(`repo:   ${shownLink(remoteLink(info, `/${mine.appName}/plans/`))}`);
+      keyHint();
     }
     return;
   }
@@ -805,8 +1040,7 @@ async function hubRemote(argv) {
     stopTailscaleRemote(r);
     if (tunnelLoaded()) launchctl('bootout', `${hubDomain()}/${HUB_TUNNEL_LABEL}`);
     if (existsSync(HUB_TUNNEL_PLIST)) await fs.rm(HUB_TUNNEL_PLIST, { force: true });
-    cfg.remote = { ...r, enabled: false, disabledAt: new Date().toISOString() };
-    await writeHubConfig(cfg);
+    await updateHubConfig(c => setRemote(c, { enabled: false, disabledAt: new Date().toISOString() }));
     console.log('[plans hub remote] off — the hub answers only https://<appName>.localhost again (key kept for a later `remote on`).');
     return;
   }
@@ -821,7 +1055,7 @@ async function hubRemote(argv) {
       stopTailscaleRemote(previous);
       // If activation fails, persisted state truthfully records that the old listener is off.
       cfg.remote = { ...previous, enabled: false, disabledAt: new Date().toISOString() };
-      await writeHubConfig(cfg);
+      await updateHubConfig(c => setRemote(c, { enabled: false, disabledAt: cfg.remote.disabledAt }));
     }
     const secret = cfg.remote?.secret || randomBytes(24).toString('base64url');
     let baseUrl = null;
@@ -960,10 +1194,11 @@ ingress:
       if (!baseUrl) fail(`tunnel started but printed no URL yet — see ${HUB_TUNNEL_LOG}; \`plans hub remote status\` picks it up once it appears (a network filter such as Little Snitch may be holding ${spec.bin}).`);
     } else fail(`unknown provider "${provider}" (tailscale | funnel | ngrok | cloudflare)`);
     cfg.remote = { ...(cfg.remote || {}), enabled: true, provider, baseUrl, secret, enabledAt: new Date().toISOString() };
-    await writeHubConfig(cfg);
+    // Every remote field this command set (tsPort, tunnel names, …) is in cfg.remote; the token is not touched.
+    await updateHubConfig(c => setRemote(c, cfg.remote));
     const info = await remoteInfo({ refresh: false });
     console.log(`[plans hub remote] on via ${provider} (${provider === 'tailscale' ? 'tailnet-only: your phone needs the Tailscale app connected' : provider === 'funnel' ? 'public via Tailscale Funnel' : cfg.remote?.named ? 'named Cloudflare tunnel; gate it with an Access policy if you want WARP-only' : TUNNEL_PROVIDERS[provider].note})`);
-    console.log(`home: ${remoteLink(info, '/')}`);
+    console.log(`home: ${shownLink(remoteLink(info, '/'))}`);
     console.log('The hub picked the new config up already (mtime cache). Text yourself the link: bun run plans notify --test');
     return;
   }
@@ -1019,7 +1254,14 @@ async function renderPreview(app, key, file) {
 // links go out as their own messages after the text: summary, then each link,
 // then the optional PNG attachment. Messages.app drops back-to-back sends
 // without a short pause, hence the `delay 1` between them.
-function sendNotification(n, message, { file = null, links = [] } = {}) {
+// A transport's own error text can repeat what it was given (a command that
+// echoes its input, say), and the links in that carry the key. Every caller
+// prints the reason, so the key is cut out of it here.
+function sendNotification(n, message, options) {
+  const result = deliverNotification(n, message, options);
+  return result.sent ? result : { ...result, reason: redactKey(result.reason ?? '') };
+}
+function deliverNotification(n, message, { file = null, links = [] } = {}) {
   if (process.env.PLANS_NO_NOTIFY) return { sent: false, reason: 'PLANS_NO_NOTIFY is set' };
   if (!n || !n.channel || n.channel === 'off') return { sent: false, reason: 'notify is off (bun run plans hub notify set --channel imessage --to <handle>)' };
   const urls = links.map(l => l.url).filter(Boolean);
@@ -1081,7 +1323,8 @@ async function waitingMarkers() {
       const m = await readJsonOr(path.join(HUB_WAITING_DIR, app, f), null);
       if (!m) continue;
       // Stale marker: its `wait` process is gone → treat as not waiting.
-      if (m.pid && !processIsAlive(m.pid)) { await fs.rm(path.join(HUB_WAITING_DIR, app, f), { force: true }); continue; }
+      // Removed only if the marker there is still a dead process's (a new wait may have just written it).
+      if (m.pid && !processIsAlive(m.pid)) { await removeMarkerIf(path.join(HUB_WAITING_DIR, app, f), x => !!x.pid && !processIsAlive(x.pid)).catch(() => {}); continue; }
       out.push({ ...m, app });
     }
   }
@@ -1095,7 +1338,10 @@ function shortTitle(t) { return bareTitle(t).replace(/\s+/g, ' ').trim().slice(0
 // message so it unfurls into that page's Open Graph card. With a publish Site
 // configured (v31), a plan already copied there is linked on the Site instead
 // of the hub; a public Site has no submit route, so the hub link follows it.
-async function waitingMessage(items, { test = false, published = {} } = {}) {
+// `siteLinks: false` (`plans wait --no-publish`): this call did not copy the
+// page to the Site, so a copy that is there may be old, or may never have been
+// uploaded. The message then carries the hub link only.
+async function waitingMessage(items, { test = false, published = {}, siteLinks = true } = {}) {
   const info = await remoteInfo();
   const pub = await publishConfig();
   const link = (p) => info.live ? remoteLink(info, p) : null;
@@ -1108,15 +1354,15 @@ async function waitingMessage(items, { test = false, published = {} } = {}) {
   else if (items.length > 1) lines.push(`Claude is waiting on ${items.length} plans: ${items.map(i => `#${String(i.seq).padStart(3, '0')} ${shortTitle(i.title)} ${about(i)}`).join('; ')}.`);
   else lines.push('No plan is waiting on you right now.');
   for (const it of items.slice(0, 5)) {
-    const p = `/${it.app}/plans/${path.basename(it.file)}`;
+    const p = `/${it.app}/plans/${path.basename(it.file).replace(/\.html$/i, '')}`;
     const label = `#${String(it.seq).padStart(3, '0')} ${shortTitle(it.title)}`;
-    const site = published[planKey(it.slug, it.seq)]?.url || (pub && existsSync(mirrorPagePath(pub, it.app, it.seq, it.slug)) ? publishedUrl(pub, it.app, it.seq, it.slug) : null);
+    const site = !siteLinks ? null : published[planKey(it.slug, it.seq)]?.url || (pub && existsSync(mirrorPagePath(pub, it.app, it.seq, it.slug)) ? publishedUrl(pub, it.app, it.seq, it.slug) : null);
     if (site) {
       links.push({ label, url: site });
       if (!publishProtected(pub)) links.push({ label: `${label} (submit)`, url: link(p) });
     } else links.push({ label, url: link(p) || `https://${it.app}.localhost/plans/${path.basename(it.file)}` });
   }
-  if (items.length !== 1 || test) links.push({ label: 'All plans', url: (pub && items.length ? `${pub.baseUrl}/` : null) || link('/') || null });
+  if (items.length !== 1 || test) links.push({ label: 'All plans', url: (pub && items.length && siteLinks ? `${pub.baseUrl}/` : null) || link('/') || null });
   if (!info.live) lines.push(pub ? `Submit cannot reach Claude right now (${info.enabled ? info.reason : 'hub remote access is off'}); it saves a file instead.` : info.enabled ? `Remote is not reachable right now: ${info.reason}.` : 'Remote access is off — links work on the LAN only.');
   return { text: lines.join('\n'), links: links.filter(l => l.url) };
 }
@@ -1139,8 +1385,7 @@ async function hubNotify(argv) {
     if ('preview' in flags) next.preview = flags.preview !== 'off';
     if (channel === 'imessage' && !next.to) { console.error('imessage needs --to <phone or Apple ID email that iMessages you>'); process.exit(1); }
     if (channel === 'command' && !next.command) { console.error('command needs --command "<shell>" (message on stdin and in $PLANS_NOTIFY_TEXT)'); process.exit(1); }
-    cfg.notify = next;
-    await writeHubConfig(cfg);
+    await updateHubConfig(c => { c.notify = next; });
     console.log(`[plans hub notify] ${channel}${next.to ? ` -> ${next.to}` : ''}${next.command ? ` (${next.command})` : ''}. Try it: bun run plans notify --test`);
     return;
   }
@@ -1155,25 +1400,73 @@ async function cmdNotify(argv) {
   const n = await notifyConfig();
   const r = sendNotification(n, message.text, { file: items.length === 1 ? await previewFor(n, items[0]) : null, links: message.links });
   if (r.sent) console.log(`[plans notify] sent (${items.length} waiting, ${message.links.length} link${message.links.length === 1 ? '' : 's'})`);
-  else { console.error(`[plans notify] not sent — ${r.reason}`); console.error(message.text); for (const l of message.links) console.error(l.url); process.exit(1); }
+  else { console.error(`[plans notify] not sent — ${r.reason}`); console.error(redactKey(message.text)); for (const l of message.links) console.error(redactKey(l.url)); process.exit(1); }
 }
 // Called by `plans wait`: writes/refreshes the marker and texts once per plan
 // per NOTIFY_DEDUPE_MS (a restarted wait for the same plan stays quiet).
 // iMessage fetches the page the instant the text lands, and a cold Open Graph
 // card takes a few seconds to render — long enough for the preview to come back
 // bare. Ask the local hub for each link first so the card is already on disk.
+// v33: since hub v24 a page waits at most CARD_WAIT_MS (1.5 s) for its card,
+// so fetching the page only starts the render. The card URL waits for it, so
+// fetch that too: the text goes out once the card is current. Fetching the page
+// alone let the 2026-10-09 06:45 text leave 2 s before its card, and Messages
+// built no link preview.
+function metaContent(body, prop) {
+  const tag = body.match(new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]*>`, 'i'))?.[0];
+  const content = tag?.match(/content=["']([^"']*)["']/i)?.[1];
+  return content ? decodeHtmlText(content) : '';
+}
 async function warmPreviewCards(links) {
   const cfg = await hubConfig();
   const secret = cfg.remote?.secret;
   if (!secret || !links?.length) return;
-  const port = await hubPort();
+  const local = `http://127.0.0.1:${await hubPort()}`;
+  const get = async (url) => {
+    try { const r = await fetch(url, { signal: AbortSignal.timeout(45000) }); return r.ok ? await r.text() : ''; } catch { return ''; }
+  };
   for (const l of links.slice(0, 6)) {
     let route = null;
     try { route = new URL(l.url).pathname; } catch { continue; }
-    const url = `http://127.0.0.1:${port}${route}?key=${encodeURIComponent(secret)}`;
-    try { const r = await fetch(url, { signal: AbortSignal.timeout(45000) }); await r.arrayBuffer(); } catch {}
+    const page = await get(`${local}${route}?key=${encodeURIComponent(secret)}`);
+    // The hub names the card on the public origin; ask the local port for it.
+    let card = null;
+    try { const u = new URL(metaContent(page, 'og:image')); card = `${local}${u.pathname}${u.search}`; } catch {}
+    if (card) await get(card);
   }
 }
+// Every wait for the same plan writes the same marker file. So every change
+// to a marker (writing it, writing it again, removing it) is made under that
+// marker's own lock (`<marker>.lock`, the same lock kind as the sequence lock),
+// on a read of the file made under the lock. A wait can then never replace or
+// remove a marker that a newer wait wrote: the newer wait's write waits for
+// the lock, and the older wait, reading under the lock, finds a marker that
+// is not its own and leaves it. Readers (status, the hub) take no lock; each
+// write is atomic, so they see one whole marker or none.
+async function withMarkerLock(marker, change) {
+  const release = await acquireSequenceLock(`${marker}.lock`);
+  try { return await change(await readJsonOr(marker, null)); }
+  finally { await release(); }
+}
+// Removes the marker when `isMine` says it is still the one meant (or it cannot be read).
+function removeMarkerIf(marker, isMine) {
+  return withMarkerLock(marker, async (m) => {
+    if (m && !isMine(m)) return false;
+    await fs.rm(marker, { force: true });
+    return true;
+  });
+}
+const ownMarker = (waitId) => (m) => (m.waitId ? m.waitId === waitId : m.pid === process.pid);
+// A later write by this wait (the Site link, the time of the text) is made only
+// while the marker is still this wait's.
+function rewriteOwnMarker(marker, entry) {
+  return withMarkerLock(marker, async (now) => {
+    if (now && !ownMarker(entry.waitId)(now)) return false;
+    await writeJsonAtomic(marker, entry);
+    return true;
+  });
+}
+
 // v31: with a publish Site configured, the plan is copied there BEFORE the
 // text goes out and the text carries the Site link. A failed publish throws:
 // `plans wait` then exits 3 without texting, so a half-done announcement
@@ -1183,29 +1476,33 @@ async function announceWaiting(cfg, plan, { started, notify, publish = true }) {
   const dir = path.join(HUB_WAITING_DIR, cfg.appName);
   const marker = path.join(dir, `${key}.json`);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  const prev = await readJsonOr(marker, null);
-  const entry = { app: cfg.appName, slug: plan.slug, seq: plan.seq, title: plan.title, file: plan.file, startedAt: new Date(started).toISOString(), pid: process.pid, notifiedAt: prev?.notifiedAt || null };
-  await writeJsonAtomic(marker, entry);
+  const waitId = randomBytes(16).toString('hex');
+  const entry = { app: cfg.appName, slug: plan.slug, seq: plan.seq, title: plan.title, file: plan.file, startedAt: new Date(started).toISOString(), pid: process.pid, waitId, notifiedAt: null };
+  await withMarkerLock(marker, async (prev) => {
+    entry.notifiedAt = prev?.notifiedAt || null;
+    await writeJsonAtomic(marker, entry);
+  });
+  const clear = () => removeMarkerIf(marker, ownMarker(waitId));
   const published = {};
   const pub = publish ? await publishConfig() : null;
   if (pub) {
     try { published[key] = await publishPlan(cfg, entry, pub); }
-    catch (err) { await fs.rm(marker, { force: true }); throw Object.assign(err, { publishFailed: true }); }
+    catch (err) { await clear().catch(() => {}); throw Object.assign(err, { publishFailed: true }); }
     entry.publishedUrl = published[key].url;
-    await writeJsonAtomic(marker, entry);
+    await rewriteOwnMarker(marker, entry);
     console.error(`[plans wait] published ${published[key].url}`);
   }
   const recently = entry.notifiedAt && (Date.now() - Date.parse(entry.notifiedAt)) < NOTIFY_DEDUPE_MS;
   if (notify && !recently) {
     const n = await notifyConfig();
-    const message = await waitingMessage([entry], { published });
+    const message = await waitingMessage([entry], { published, siteLinks: publish });
     const preview = await previewFor(n, entry);
     await warmPreviewCards(message.links);
     const r = sendNotification(n, message.text, { file: preview, links: message.links });
-    if (r.sent) { entry.notifiedAt = new Date().toISOString(); await writeJsonAtomic(marker, entry); console.error(`[plans wait] texted you the link`); }
+    if (r.sent) { entry.notifiedAt = new Date().toISOString(); await rewriteOwnMarker(marker, entry); console.error(`[plans wait] texted you the link`); }
     else console.error(`[plans wait] no text sent — ${r.reason}`);
   }
-  return marker;
+  return { marker, clear };
 }
 
 
@@ -1213,13 +1510,15 @@ async function announceWaiting(cfg, plan, { started, notify, publish = true }) {
 // `plans publish <slug>` copies a plan page to the cresa.one Site named in
 // hub.config.json `publish`, then checks the link card a phone will show.
 // `plans wait` runs it before texting, so the text links the Site page
-// (https://<site>.cresa.one/<app>/<NNN>-<slug>.html) instead of the hub tunnel.
+// (https://<site>.cresa.one/<app>/<NNN>-<slug>) instead of the hub tunnel.
 //
 // - One local mirror directory holds the whole Site, because a cresa.one
 //   publish replaces every file. Pages from all repos live there side by side.
 // - cresa.one does not serve a folder's index.html (`/x/` redirects to `/x`,
 //   which is a 404), so each page is a flat `<NNN>-<slug>.html` file and its
-//   card is `<NNN>-<slug>/og.png`.
+//   card is `<NNN>-<slug>/og.png`. cresa.one answers `/<app>/<NNN>-<slug>`
+//   with that file, so every link we hand out leaves out ".html" (v38); the
+//   `.html` URL still opens the same page.
 // - A protected Site (access "restricted") hides every file from link
 //   previewers and shows only the Site viewer title, description, and image.
 //   Each publish therefore points the viewer metadata at the plan being sent.
@@ -1250,7 +1549,7 @@ async function publishConfig() {
 function publishProtected(pub) { return !!pub && pub.access !== 'anyone_with_link'; }
 function pageStem(seq, slug) { return `${String(seq).padStart(3, '0')}-${slug}`; }
 function mirrorPagePath(pub, app, seq, slug) { return path.join(pub.mirror, app, `${pageStem(seq, slug)}.html`); }
-function publishedUrl(pub, app, seq, slug) { return `${pub.baseUrl}/${app}/${pageStem(seq, slug)}.html`; }
+function publishedUrl(pub, app, seq, slug) { return `${pub.baseUrl}/${app}/${pageStem(seq, slug)}`; }
 
 // Facts the card and the text need, read from the stamped page source.
 function planFacts(source) {
@@ -1309,7 +1608,7 @@ async function planCard(pub, app, file, { title, sub, label }) {
   const secret = (await hubConfig()).remote?.secret;
   if (secret) {
     try {
-      const r = await fetch(`http://127.0.0.1:${await hubPort()}/${app}/plans/${encodeURIComponent(name)}?key=${encodeURIComponent(secret)}`, { signal: AbortSignal.timeout(45000) });
+      const r = await fetch(`http://127.0.0.1:${await hubPort()}/${app}/plans/${encodeURIComponent(name.replace(/\.html$/i, ''))}?key=${encodeURIComponent(secret)}`, { signal: AbortSignal.timeout(45000) });
       await r.arrayBuffer();
       if (r.ok && existsSync(png) && statSync(png).mtimeMs >= statSync(file).mtimeMs) return png;
     } catch {}
@@ -1326,13 +1625,34 @@ async function ogScriptCard(pub, { title, sub, label, footer }) {
   return png ? path.join(out, png) : null;
 }
 
+function readJsonSyncOr(file, fallback) {
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return fallback; }
+}
 function planStatus(app, slug, seq) {
   const key = `${planKey(slug, seq)}.json`;
-  if (existsSync(path.join(HUB_DONE_DIR, app, key))) return 'implemented';
-  if (existsSync(path.join(HUB_INBOX_DIR, app, key))) return 'submitted';
-  const marker = path.join(HUB_WAITING_DIR, app, key);
-  try { const m = JSON.parse(readFileSync(marker, 'utf8')); if (!m.pid || processIsAlive(m.pid)) return 'waiting'; } catch {}
+  // A done marker can cover part of a submission, or a submission from before
+  // the reader sent a new one. Only a marker for the submission that is in
+  // the inbox now, with every approved item, makes a plan "implemented": the
+  // same rule as `plans status` and the hub.
+  const inbox = readJsonSyncOr(inboxPath(app, key), null);
+  // A wait that is running and began after the receipt in the inbox is a new
+  // round (the page was changed and sent out again): the plan waits for the
+  // reader, whatever the old receipt and its done marker say.
+  const waiting = readJsonSyncOr(path.join(HUB_WAITING_DIR, app, key), null);
+  const live = !!waiting && (!waiting.pid || processIsAlive(waiting.pid));
+  if (live && (!inbox || Date.parse(inbox.receivedAt) < Date.parse(waiting.startedAt))) return 'waiting';
+  if (inbox && fullyImplemented(readJsonSyncOr(path.join(HUB_DONE_DIR, app, key), null), inbox)) return 'implemented';
+  if (inbox || existsSync(inboxPath(app, key))) return 'submitted';
   return 'idle';
+}
+
+// v38: links to a mirrored page on this Site leave out ".html". Rewrites
+// `/<app>/<NNN>-<slug>.html` (relative or on pub.baseUrl) only when that page
+// is in the mirror, so pages copied before v38, or by other tools, converge on
+// the next publish. External links and file names are untouched.
+function cleanSiteLinks(source, pub, mirrored) {
+  return source.replace(/(["'(])((?:https?:\/\/[^\s"'()/]+)?)\/([a-z0-9][a-z0-9-]*)\/(\d{3}-[a-z0-9-]+)\.html(?=[#?"')])/g,
+    (all, open, origin, app, stem) => (!origin || origin === pub.baseUrl) && mirrored.has(`${app}/${stem}.html`) ? `${open}${origin}/${app}/${stem}` : all);
 }
 
 // Site landing page: every mirrored plan, waiting first, grouped by repo.
@@ -1340,15 +1660,23 @@ async function writeMirrorIndex(pub) {
   const rows = [];
   let appsDirs = [];
   try { appsDirs = (await fs.readdir(pub.mirror, { withFileTypes: true })).filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name); } catch {}
+  const pages = [];
   for (const app of appsDirs) {
     for (const name of await fs.readdir(path.join(pub.mirror, app))) {
       const m = name.match(PAGE_RE);
-      if (!m) continue;
-      const head = (await fs.readFile(path.join(pub.mirror, app, name), 'utf8')).slice(0, 6000);
-      const title = decodeHtmlText(head.match(/<title>([^<]+)<\/title>/i)?.[1] || name);
-      const facts = planFacts(await fs.readFile(path.join(pub.mirror, app, name), 'utf8'));
-      rows.push({ app, name, seq: Number(m[1]), slug: m[2], title: bareTitle(title), date: facts.date || '', decisions: facts.decisions, status: planStatus(app, m[2], Number(m[1])) });
+      if (m) pages.push({ app, name, m });
     }
+  }
+  const mirrored = new Set(pages.map(p => `${p.app}/${p.name}`));
+  for (const { app, name, m } of pages) {
+    const file = path.join(pub.mirror, app, name);
+    let source = await fs.readFile(file, 'utf8');
+    const cleaned = cleanSiteLinks(source, pub, mirrored);
+    if (cleaned !== source) { await fs.writeFile(file, cleaned); source = cleaned; }
+    const head = source.slice(0, 6000);
+    const title = decodeHtmlText(head.match(/<title>([^<]+)<\/title>/i)?.[1] || name);
+    const facts = planFacts(source);
+    rows.push({ app, name, seq: Number(m[1]), slug: m[2], title: bareTitle(title), date: facts.date || '', decisions: facts.decisions, status: planStatus(app, m[2], Number(m[1])) });
   }
   const rank = { waiting: 0, submitted: 1, idle: 2, implemented: 3 };
   rows.sort((a, b) => rank[a.status] - rank[b.status] || b.date.localeCompare(a.date) || b.seq - a.seq);
@@ -1358,7 +1686,7 @@ async function writeMirrorIndex(pub) {
   const e = escapeHtml;
   const waiting = rows.filter(r => r.status === 'waiting').length;
   const description = waiting ? `${waiting} plan${waiting === 1 ? '' : 's'} waiting for your decisions.` : 'Decision pages from every repo, ready to review.';
-  const sections = [...byApp].map(([app, list]) => `  <h2>${e(app)}</h2>\n  <ul>\n${list.map(r => `    <li><a class="row" href="/${e(app)}/${e(r.name)}">
+  const sections = [...byApp].map(([app, list]) => `  <h2>${e(app)}</h2>\n  <ul>\n${list.map(r => `    <li><a class="row" href="/${e(app)}/${e(r.name.replace(/\.html$/i, ''))}">
       <span class="seq">#${String(r.seq).padStart(3, '0')}</span>
       <span class="t"><b>${e(r.title)}</b><span>${e([r.date, r.decisions ? `${r.decisions} decision${r.decisions === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · '))}</span></span>
       <span class="st st-${r.status}">${label[r.status]}</span>
@@ -1367,7 +1695,7 @@ async function writeMirrorIndex(pub) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>${e(pub.siteTitle)}</title>
 ${publishTags({ title: pub.siteTitle, description, url: `${pub.baseUrl}/`, image: existsSync(path.join(pub.mirror, 'og.png')) ? `${pub.baseUrl}/og.png` : null, siteName: pub.siteTitle })}
 <style>
@@ -1376,16 +1704,21 @@ ${publishTags({ title: pub.siteTitle, description, url: `${pub.baseUrl}/`, image
 @media (prefers-color-scheme: light){:root:not([data-theme="dark"]){--bg:#fafaf7;--surface:#fff;--line:#e4e4de;--ink:#141414;--muted:#55555c;--accent:oklch(0.5 0.16 245);--warn:oklch(0.55 0.14 75);--ok:oklch(0.5 0.14 150)}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:400 1rem/1.5 var(--font-ui)}
-main{max-width:760px;margin:0 auto;padding:32px 16px 64px}
+main{max-width:760px;margin:0 auto;padding:max(32px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(64px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
 h1{font-size:1.75rem;letter-spacing:-.02em;margin:0 0 4px}
 .sub{color:var(--muted);margin:0 0 24px}
 h2{font:600 .75rem/1 var(--font-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:24px 0 8px}
 ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 a.row{display:flex;gap:12px;align-items:center;min-height:56px;padding:12px 16px;background:var(--surface);border:1px solid var(--line);border-radius:12px;color:inherit;text-decoration:none}
-a.row:hover,a.row:focus-visible{border-color:var(--accent);outline:none}
+@media(hover:hover) and (pointer:fine){a.row:hover{border-color:var(--accent)}}
+a.row{touch-action:manipulation;transition:transform 120ms cubic-bezier(.23,1,.32,1)}
+a.row:active{transform:scale(.99)}
+@media(prefers-reduced-motion:reduce){a.row{transition:none}a.row:active{transform:none}}
+a.row:focus-visible{border-color:var(--accent);outline:2px solid var(--accent);outline-offset:3px}
 .seq{font:600 .8125rem var(--font-mono);background:var(--accent);color:#000;border-radius:999px;padding:2px 10px;flex:none}
 .t{flex:1;min-width:0}
-.t b{display:block;font-weight:600}
+.t b{display:block;font-weight:600;overflow-wrap:anywhere}
+@media(max-width:480px){a.row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 12px}.st{grid-column:2}.seq{align-self:start}}
 .t span{color:var(--muted);font:400 .8125rem var(--font-mono)}
 .st{font:600 .75rem var(--font-mono);flex:none;color:var(--muted)}
 .st-waiting{color:var(--warn)}
@@ -1428,6 +1761,42 @@ async function siteExists(pub) {
   catch (err) { if (/HTTP 404/.test(err.message)) return false; throw err; }
 }
 
+// The Bearer token that cresa.one sends to the hub lives in two places: the
+// hub's config and a cresa.one variable. Two publishes at once (two `plans
+// wait` runs, say) must not each make a token, or each write one, or the two
+// places can end up with different tokens and every Submit on the Site fails.
+// So making the token, writing the variable, and recording what was written
+// happen under one lock for the whole hub, on a fresh read of the config.
+// A wait holds it across two cresa.one calls, so the time limit is long. The
+// config itself is changed through updateHubConfig, like every other change.
+const PROXY_TOKEN_LOCK_PATH = path.join(HUB_DIR, '.proxy-token.lock');
+const PROXY_TOKEN_LOCK_TIMEOUT_MS = Number(process.env.__PLANS_PROXY_LOCK_TIMEOUT_MS || 120_000);
+const PROXY_TEST_PAUSE_MS = Number(process.env.__PLANS_PROXY_TEST_PAUSE_MS || 0);
+async function syncProxyToken(upstream) {
+  const release = await acquireSequenceLock(PROXY_TOKEN_LOCK_PATH, PROXY_TOKEN_LOCK_TIMEOUT_MS);
+  try {
+    // Tests widen the gap between the read and the write, where two runs without the lock would both make a token.
+    if (PROXY_TEST_PAUSE_MS) await lockSleep(PROXY_TEST_PAUSE_MS);
+    const hub = await updateHubConfig((c) => {
+      if (c.remote?.proxyToken) return;
+      c.remote = { ...(c.remote || {}), proxyToken: randomBytes(32).toString('base64url') };
+      delete c.remote.proxyTokenSynced;
+    });
+    const token = hub.remote.proxyToken;
+    const vars = (await cresaApi('GET', '/me/variables'))?.variables || [];
+    const v = vars.find(x => x.name === PROXY_VARIABLE);
+    // cresa.one never returns a variable's value, so the hub records a
+    // fingerprint of what it last wrote and rewrites when the token or origin moved.
+    const fingerprint = createHash('sha256').update(`${token}\n${upstream}`).digest('hex').slice(0, 16);
+    if (!v || v.upstreamOrigin !== upstream || hub.remote.proxyTokenSynced !== fingerprint) {
+      await cresaApi('PUT', `/me/variables/${PROXY_VARIABLE}`, { value: token, upstreamOrigin: upstream });
+      await updateHubConfig((c) => { c.remote = { ...(c.remote || {}), proxyToken: token, proxyTokenSynced: fingerprint }; });
+    }
+  } finally {
+    await release();
+  }
+}
+
 // Make the Site match the config: access mode, public link cards, and (when
 // protected) the submit proxy route plus its Bearer variable. Idempotent: reads
 // first and writes only what differs. Needs the Site to exist.
@@ -1451,20 +1820,7 @@ async function ensureSiteAccess(pub) {
   if (current.publicPreviewEnabled !== true) await cresaApi('PATCH', `/publish/${pub.site}/access`, { publicPreviewEnabled: true });
   const upstream = hub.remote?.baseUrl ? new URL(hub.remote.baseUrl).origin : null;
   if (!hub.remote?.enabled || !upstream || !hub.remote?.secret) return { mode: 'restricted', proxy: false, reason: 'hub remote access is off, so Submit has nowhere to go (bun run plans hub remote on)' };
-  if (!hub.remote.proxyToken) {
-    hub.remote.proxyToken = randomBytes(32).toString('base64url');
-    await writeHubConfig(hub);
-  }
-  const vars = (await cresaApi('GET', '/me/variables'))?.variables || [];
-  const v = vars.find(x => x.name === PROXY_VARIABLE);
-  // cresa.one never returns a variable's value, so the hub records a
-  // fingerprint of what it last wrote and rewrites when the token or origin moved.
-  const fingerprint = createHash('sha256').update(`${hub.remote.proxyToken}\n${upstream}`).digest('hex').slice(0, 16);
-  if (!v || v.upstreamOrigin !== upstream || hub.remote.proxyTokenSynced !== fingerprint) {
-    await cresaApi('PUT', `/me/variables/${PROXY_VARIABLE}`, { value: hub.remote.proxyToken, upstreamOrigin: upstream });
-    hub.remote.proxyTokenSynced = fingerprint;
-    await writeHubConfig(hub);
-  }
+  await syncProxyToken(upstream);
   const routes = (await cresaApi('GET', `/publish/${pub.site}/proxy-routes`))?.proxyRoutes || [];
   const route = routes.find(r => r.pathPrefix === PROXY_PREFIX);
   if (route && (route.upstreamOrigin !== upstream || route.authVariableName !== PROXY_VARIABLE)) {
@@ -1476,27 +1832,39 @@ async function ensureSiteAccess(pub) {
   return { mode: 'restricted', proxy: true };
 }
 
-function runPublishScript(pub, viewer) {
+function runPublishScript(pub, viewer, dir = pub.mirror) {
   if (!existsSync(pub.script)) throw new Error(`publish script not found: ${pub.script} (install the cresa-one skill)`);
-  const args = [pub.mirror, '--slug', pub.site, '--title', viewer.title, '--description', viewer.description,
+  const args = [dir, '--slug', pub.site, '--title', viewer.title, '--description', viewer.description,
     '--og-image-path', viewer.ogImagePath, '--tags', JSON.stringify(pub.tags), '--client', 'claude'];
   // A protected Site answers every file with its access gate, so byte-level
   // verification would fail by design; verifyPreview checks the card instead.
   if (publishProtected(pub)) args.push('--no-verify');
-  const r = spawnSync(pub.script, args, { encoding: 'utf8', timeout: 300000, cwd: pub.mirror });
+  const r = spawnSync(pub.script, args, { encoding: 'utf8', timeout: 300000, cwd: dir });
   if (r.status !== 0) throw new Error(`publish.sh exit ${r.status}: ${(r.stderr || r.stdout || '').trim().split('\n').slice(-3).join(' | ')}`);
   return r.stdout;
+}
+
+// cresa.one creates a new Site public. A Site that must be protected is
+// therefore created from a folder with nothing of the plans in it, and
+// restricted, before any plan is uploaded. When it cannot be restricted the
+// command stops here: no plan was public at any moment, and none is uploaded.
+async function createProtectedSite(pub) {
+  if (pub.access !== 'restricted') throw new Error(`publish.access "${pub.access}" is not supported (use restricted or anyone_with_link)`);
+  if (!(pub.allowEmails || []).length && !(pub.allowDomains || []).length) throw new Error('restricted access needs at least one allowed email (bun run plans hub publish set --allow you@example.com)');
+  const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'plans-new-site-'));
+  try {
+    await fs.writeFile(path.join(empty, 'index.html'), '<!doctype html><meta charset="utf-8"><title>Plans</title><p>Nothing here yet.</p>\n');
+    runPublishScript(pub, { title: pub.siteTitle, description: 'Decision pages.', ogImagePath: '/og.png' }, empty);
+  } finally {
+    await fs.rm(empty, { recursive: true, force: true });
+  }
+  await ensureSiteAccess(pub);
 }
 
 // Fetch the link the way a link previewer does and prove the card is there:
 // og:title names this plan and og:image answers 200 image/*. Retries briefly
 // because the Site CDN can serve the previous version for a few seconds.
 async function verifyPreview(url, expectTitle) {
-  const metaContent = (body, prop) => {
-    const tag = body.match(new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]*>`, 'i'))?.[0];
-    const content = tag?.match(/content=["']([^"']*)["']/i)?.[1];
-    return content ? decodeHtmlText(content) : '';
-  };
   const want = bareTitle(expectTitle).slice(0, 40);
   let reason = 'not checked';
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -1518,8 +1886,23 @@ async function verifyPreview(url, expectTitle) {
   return { ok: false, reason };
 }
 
-// Copy one plan to the Site, publish, and verify. Returns { url, decisions }.
+// One Site, one mirror, for every repo: a publish replaces the whole Site with
+// the mirror. Two publishes at once could each find no Site and each create
+// one, the later empty upload replacing a plan the other had just published
+// and texted; or each write the landing page, the later one without the
+// other's plan. So a publish (mirror, landing page, Site creation, upload,
+// check) runs under one lock for the whole hub. A publish waits for the one
+// before it; the limit covers an upload (5 min) and the card check (~2.5 min).
+const PUBLISH_LOCK_PATH = path.join(HUB_DIR, '.publish.lock');
+const PUBLISH_LOCK_TIMEOUT_MS = Number(process.env.__PLANS_PUBLISH_LOCK_TIMEOUT_MS || 15 * 60_000);
 async function publishPlan(cfg, plan, pub) {
+  const release = await acquireSequenceLock(PUBLISH_LOCK_PATH, PUBLISH_LOCK_TIMEOUT_MS);
+  try { return await publishPlanLocked(cfg, plan, pub); }
+  finally { await release(); }
+}
+
+// Copy one plan to the Site, publish, and verify. Returns { url, decisions }.
+async function publishPlanLocked(cfg, plan, pub) {
   const source = await fs.readFile(plan.file, 'utf8');
   const facts = planFacts(source);
   const stem = pageStem(plan.seq, plan.slug);
@@ -1544,13 +1927,14 @@ async function publishPlan(cfg, plan, pub) {
   await writeMirrorIndex(pub);
   const exists = await siteExists(pub);
   if (exists) await ensureSiteAccess(pub);
+  else if (publishProtected(pub)) await createProtectedSite(pub);
   // Protected: link previewers only ever see the viewer metadata, so it names
   // this plan. Public: each page carries its own tags; the viewer stays the Site.
   const viewer = publishProtected(pub)
     ? { title, description, ogImagePath: image ? ogPath : '/og.png' }
     : { title: pub.siteTitle, description: `Latest: #${String(plan.seq).padStart(3, '0')} ${title} (${app})`, ogImagePath: '/og.png' };
   runPublishScript(pub, viewer);
-  // A brand-new Site is created public; lock it down straight after.
+  // Checked again after the upload: a protected Site was restricted before it (see createProtectedSite).
   const access = await ensureSiteAccess(pub);
   if (process.env.__PLANS_PUBLISH_SKIP_VERIFY !== '1') {
     const v = await verifyPreview(url, title);
@@ -1609,8 +1993,7 @@ async function hubPublish(argv) {
       next.access = flags.access;
     }
     if ('allow' in flags) next.allowEmails = [...new Set([...(next.allowEmails || []), ...flags.allow.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)])];
-    cfg.publish = next;
-    await writeHubConfig(cfg);
+    await updateHubConfig(c => { c.publish = next; });
     const pub = await publishConfig();
     if (await siteExists(pub).catch(() => false)) {
       const a = await ensureSiteAccess(pub);
@@ -1618,7 +2001,7 @@ async function hubPublish(argv) {
     } else console.log(`[plans hub publish] ${pub.baseUrl}/ · the Site is created on the first \`plans publish\``);
     return;
   }
-  if (sub === 'off') { delete cfg.publish; await writeHubConfig(cfg); console.log('[plans hub publish] off (the Site itself is untouched)'); return; }
+  if (sub === 'off') { await updateHubConfig(c => { delete c.publish; }); console.log('[plans hub publish] off (the Site itself is untouched)'); return; }
   console.error('Usage: plans hub publish [status | set --site <slug> [--allow you@example.com] [--access restricted|anyone_with_link] [--base-url URL] [--mirror dir] [--title "Site title"] | off]');
   process.exit(1);
 }
@@ -1626,11 +2009,20 @@ async function hubPublish(argv) {
 
 /* ---------------- lifecycle: done · status · inbox import (v19) ---------------- */
 function planKey(slug, seq) { return `${slug}-${String(seq).padStart(3, '0')}`; }
-function pageSuffix(slug, seq) { return `-${String(seq).padStart(3, '0')}-${slug}.html`; }
+// The slug of a plan page, which is named <date>-<NNN>-<slug>.html. It is
+// compared whole: neither "security-review" nor "phase-003-review" is "review".
+function planSlugOf(name) { return name.match(/^\d{4}-\d{2}-\d{2}-\d{3}-(.+)\.html$/i)?.[1]?.toLowerCase() ?? null; }
+// Whether a file is the page for this slug and number. Both are read from the
+// name and compared whole, so "#003 review" is not "#004 phase-003-review".
+function isPlanPage(name, slug, seq) {
+  const m = name.match(/^\d{4}-\d{2}-\d{2}-(\d{3})-(.+)\.html$/i);
+  return !!m && Number(m[1]) === Number(seq) && m[2].toLowerCase() === String(slug).toLowerCase();
+}
 async function resolvePlan(slugArg, seqFlag) {
   const slug = (slugArg || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
   if (!slug) return null;
-  const plans = (await listPlans()).filter(p => p.name.endsWith(`-${slug}.html`) && p.seq != null);
+  // The whole slug, not its tail: "review" must not pick "security-review".
+  const plans = (await listPlans()).filter(p => p.seq != null && planSlugOf(p.name) === slug);
   let seq = Number(seqFlag);
   if (!Number.isInteger(seq) || seq < 1) { if (!plans.length) return null; seq = Math.max(...plans.map(p => p.seq)); }
   const plan = plans.find(p => p.seq === seq) || null;
@@ -1668,7 +2060,7 @@ async function cmdDone(argv) {
   const r = await resolvePlan(rest[0], flags.seq);
   if (!r) { console.error('Usage: plans done <slug> [--seq N] [--items d01,d03] [--note "…"] [--commit sha,…]'); process.exit(1); }
   const key = planKey(r.slug, r.seq);
-  const inboxFile = path.join(HUB_INBOX_DIR, cfg.appName, `${key}.json`);
+  const inboxFile = inboxPath(cfg.appName, `${key}.json`);
   const inbox = await readJsonOr(inboxFile, null);
   if (!inbox && !('force' in flags)) { console.error(`[plans done] no submission in the hub inbox for ${key} (${inboxFile}). Wait for the reader to submit, import a legacy file (plans inbox import), or pass --force.`); process.exit(1); }
   const approved = Array.isArray(inbox?.decisions) ? inbox.decisions.filter(d => d.status === 'approved').map(d => d.id) : [];
@@ -1712,7 +2104,7 @@ async function lifecycle(app, root) {
     let title = n;
     try { const t = (await fs.readFile(path.join(dir, n), 'utf8')).slice(0, 4000).match(/<title>([^<]+)<\/title>/i); if (t) title = decodeHtmlText(t[1].trim()).replace(/^#\d{3}\s+/, ''); } catch {}
     const waiting = await readJsonOr(path.join(HUB_WAITING_DIR, app, `${key}.json`), null);
-    const inbox = await readJsonOr(path.join(HUB_INBOX_DIR, app, `${key}.json`), null);
+    const inbox = await readJsonOr(inboxPath(app, `${key}.json`), null);
     const done = await readJsonOr(path.join(HUB_DONE_DIR, app, `${key}.json`), null);
     const counts = Array.isArray(inbox?.decisions) ? inbox.decisions.reduce((c, d) => { c[d.status] = (c[d.status] || 0) + 1; return c; }, { approved: 0, rejected: 0, pending: 0 }) : null;
     const approvedIds = Array.isArray(inbox?.decisions) ? inbox.decisions.filter(d => d.status === 'approved').map(d => d.id) : [];
@@ -1772,7 +2164,7 @@ async function cmdInbox(argv) {
     const candidates = [];
     for (const [app, e] of Object.entries(reg.apps || {})) {
       if (!e?.root || (d.plan.repo && d.plan.repo !== app && d.plan.repo !== path.basename(e.root))) continue;
-      try { if ((await fs.readdir(path.join(e.root, 'docs', 'plans'))).some(n => n.endsWith(pageSuffix(d.plan.slug, d.plan.seq)))) candidates.push([app, e.root]); } catch {}
+      try { if ((await fs.readdir(path.join(e.root, 'docs', 'plans'))).some(n => isPlanPage(n, d.plan.slug, d.plan.seq))) candidates.push([app, e.root]); } catch {}
     }
     if (candidates.length > 1) { console.log(`skip  ${path.basename(file)} — ambiguous repository; use its unique appName in plan.repo`); continue; }
     const hit = candidates[0];
@@ -1784,7 +2176,7 @@ async function cmdInbox(argv) {
     const [app, root] = hit;
     let names = [];
     try { names = await fs.readdir(path.join(root, 'docs', 'plans')); } catch {}
-    const page = names.find(n => n.endsWith(pageSuffix(d.plan.slug, d.plan.seq)));
+    const page = names.find(n => isPlanPage(n, d.plan.slug, d.plan.seq));
     if (!page) { console.log(`skip  ${path.basename(file)} — ${app} has no page for ${key}`); continue; }
     const dir = path.join(HUB_INBOX_DIR, app);
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
@@ -1803,47 +2195,65 @@ async function cmdWait(argv) {
   const slug = (rest[0] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
   if (!slug) { console.error('Usage: plans wait <slug> [--seq N] [--timeout seconds] [--any] [--no-notify] [--no-publish]'); process.exit(1); }
   const cfg = await ensureConfig();
-  const plans = (await listPlans()).filter(p => p.name.endsWith(`-${slug}.html`) && p.seq != null);
+  // The whole slug, not its tail: "review" must not pick "security-review".
+  const plans = (await listPlans()).filter(p => p.seq != null && planSlugOf(p.name) === slug);
   let seq = Number(flags.seq);
   if (!Number.isInteger(seq) || seq < 1) {
     if (!plans.length) { console.error(`No plan page for slug "${slug}" in ${PLANS_DIR}`); process.exit(1); }
     seq = Math.max(...plans.map(p => p.seq));
   }
-  const plan = plans.find(p => p.seq === seq) || { title: slug, path: path.join(PLANS_DIR, `${slug}.html`) };
+  const plan = plans.find(p => p.seq === seq);
+  // No page with this slug and number: there is nothing a reader could submit, so nothing is announced and nothing is waited for.
+  if (!plan) { console.error(`No plan page for slug "${slug}" with number ${seq} in ${PLANS_DIR}`); process.exit(1); }
+  const sendTarget = waitTarget(flags);
+  const keyJson = `${slug}-${String(seq).padStart(3, '0')}.json`;
   const dir = path.join(HUB_INBOX_DIR, cfg.appName);
-  const target = path.join(dir, `${slug}-${String(seq).padStart(3, '0')}.json`);
+  const dirs = sendTarget ? [targetInboxDir(cfg.appName, sendTarget), dir] : [dir];
+  const candidates = dirs.map(d => path.join(d, keyJson));
+  let target = candidates[0];
   const started = Date.now();
   const timeoutMs = Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : 0;
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  for (const d of dirs) await fs.mkdir(d, { recursive: true, mode: 0o700 });
+  // A receipt counts when it was written after this command was started. The
+  // start of the process is the line, not a moment later in it, so a
+  // submission that lands while the command is starting up is not missed; and
+  // no receipt from before the command counts (use --any for those), so a
+  // wait that is started again right after an edit does not hand back the
+  // decisions of the page as it was.
+  const launched = Date.now() - process.uptime() * 1000;
   async function ready() {
-    try {
-      const st = await fs.stat(target);
-      return 'any' in flags || st.mtimeMs >= started - 1000;
-    } catch { return false; }
+    for (const f of candidates) {
+      try {
+        const st = await fs.stat(f);
+        if ('any' in flags || st.mtimeMs >= launched) { target = f; return true; }
+      } catch {}
+    }
+    return false;
   }
   if (await ready()) { console.log(target); return; }
-  console.error(`[plans wait] ${cfg.appName} · ${slug} #${seq} — waiting for a submission at https://${cfg.appName}.localhost/plans/`);
+  console.error(`[plans wait] ${cfg.appName} · ${slug} #${seq} — waiting for a submission${sendTarget ? ` sent to ${sendTarget}` : ''} at https://${cfg.appName}.localhost/plans/`);
   // v19: marker for the remote landing page + a text with the link.
-  let marker;
-  try { marker = await announceWaiting(cfg, { slug, seq, title: plan.title, file: plan.path }, { started, notify: !('no-notify' in flags), publish: !('no-publish' in flags) }); }
+  let announced;
+  try { announced = await announceWaiting(cfg, { slug, seq, title: plan.title, file: plan.path }, { started, notify: !('no-notify' in flags), publish: !('no-publish' in flags) }); }
   catch (err) {
     if (!err.publishFailed) throw err;
     console.error(`[plans wait] publish failed, nothing texted — ${err.message}`);
     console.error('[plans wait] fix the cause and run wait again (bun run plans hub publish status), or pass --no-publish to text the hub link only');
     process.exit(3);
   }
-  const clear = () => { try { rmSync(marker, { force: true }); } catch {} };
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { clear(); process.exit(130); });
+  // Removes the marker only while it is still this wait's: a newer wait for the same plan keeps its own.
+  const clear = () => announced.clear().catch(() => {});
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { await clear(); process.exit(130); });
   await new Promise((resolve, reject) => {
     let done = false;
-    const finish = () => { if (done) return; done = true; clearInterval(poll); clearTimeout(deadline); try { watcher?.close(); } catch {} resolve(); };
+    const finish = () => { if (done) return; done = true; clearInterval(poll); clearTimeout(deadline); try { watchers.forEach(w => w.close()); } catch {} resolve(); };
     const check = () => ready().then(ok => { if (ok) finish(); }).catch(() => {});
-    let watcher = null;
-    try { watcher = fsWatch(dir, check); } catch {}
+    const watchers = [];
+    for (const d of dirs) { try { watchers.push(fsWatch(d, check)); } catch {} }
     const poll = setInterval(check, 2000);
-    const deadline = timeoutMs ? setTimeout(() => { if (!done) { done = true; clearInterval(poll); try { watcher?.close(); } catch {} reject(new Error('timed out')); } }, timeoutMs) : null;
-  }).catch(() => { clear(); console.error('[plans wait] timed out'); process.exit(2); });
-  clear();
+    const deadline = timeoutMs ? setTimeout(() => { if (!done) { done = true; clearInterval(poll); try { watchers.forEach(w => w.close()); } catch {} reject(new Error('timed out')); } }, timeoutMs) : null;
+  }).catch(async () => { await clear(); console.error('[plans wait] timed out'); process.exit(2); });
+  await clear();
   console.log(target);
 }
 
@@ -1963,6 +2373,10 @@ async function cmdNew(argv) {
       Number(cfg.nextSeq) || 1,
       ...existing.map(plan => (plan.seq ?? 0) + 1),
     );
+    // A plan number has three digits everywhere it is read (file names, Site
+    // links, the hub). Past 999 nothing is stamped, rather than a page that no
+    // command could find. (Thrown, so the lock is released; main prints it.)
+    if (seq > MAX_PLAN_SEQ) throw new Error(`plans new: plan numbers stop at ${MAX_PLAN_SEQ} (three digits) and this repo would need #${seq}; nothing was stamped.`);
     // v17: the page talks to the always-on hub through portless. The per-repo
     // loopback `port` stays in the config for pages stamped before v17.
     const endpoint = `https://${cfg.appName}.localhost`;
@@ -2017,7 +2431,7 @@ async function cmdNew(argv) {
 //
 // The pre-appkit path — copying docs/plans/.app-template*.html — is still here
 // as a fallback for machines without appkit installed, and for named variants
-// (--template changes) that have not been ported to a recipe yet.
+// requested by name that have not been ported to a recipe yet. Changes is ported.
 async function cmdApp(argv) {
   const { flags, rest } = parseFlags(argv);
   const slug = (rest[0] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -2029,9 +2443,9 @@ async function cmdApp(argv) {
 
   // Delegate to appkit unless an unported named variant was explicitly asked for.
   const kitBin = path.join(process.env.HOME || '', '.claude', 'templates', 'appkit', 'bin', 'appkit.mjs');
-  const wantsLegacyVariant = !!flags.template;
+  const wantsLegacyVariant = !!flags.template && flags.template !== "changes";
   if (!wantsLegacyVariant && existsSync(kitBin)) {
-    const args = [kitBin, 'new', slug, '--recipe', flags.recipe || 'workspace', '--root', ROOT];
+    const args = [kitBin, 'new', slug, '--recipe', flags.recipe || (flags.template === 'changes' ? 'changes' : 'workspace'), '--root', ROOT];
     if (flags.title) args.push('--title', flags.title);
     if (flags.badge) args.push('--badge', flags.badge);
     if (flags.dest) args.push('--dest', destination.relative);
@@ -2081,17 +2495,69 @@ async function cmdApp(argv) {
 // reached at the SAME stable https://<appName>.localhost URL — no hardcoded
 // ports, no EADDRINUSE. portless injects a free PORT (+ HOST, PORTLESS_URL)
 // into the child, so servers must listen on process.env.PORT.
+//
+// Re-running the same `serve` replaces the previous instance of that app name
+// (v35). portless's own `--force` is not enough: it SIGTERMs the old portless
+// and writes the new route in one step, and the dying portless then removes
+// the route *by hostname* on its way out — wiping the entry the new instance
+// just registered. So we retire the old owner ourselves, wait for it to be
+// gone, and only then start portless. `--keep` restores the refuse-to-clobber
+// behaviour; `--force` is accepted as a no-op for muscle memory.
+
+// portless keeps live routes in <state>/routes.json as {hostname, port, pid}.
+function portlessRoutesFile() {
+  return path.join(process.env.PORTLESS_STATE_DIR || path.join(os.homedir(), '.portless'), 'routes.json');
+}
+
+// Match the full hostname using the running proxy's persisted TLD. A prefix
+// match could select <name>.<other-project>.<tld>, which belongs to a worktree
+// of another app. PORTLESS_TLD only configures a new proxy, not an active one.
+// Alias routes (pid 0) and dead owners are not conflicts — portless replaces
+// those on its own.
+function portlessLiveRoute(name) {
+  const routesFile = portlessRoutesFile();
+  let tld = 'localhost';
+  try { tld = readFileSync(path.join(path.dirname(routesFile), 'proxy.tld'), 'utf8').trim() || tld; }
+  catch (err) { if (err.code !== 'ENOENT') return null; }
+  if (!/^[a-z0-9]+$/.test(tld)) return null;
+  let routes;
+  try { routes = JSON.parse(readFileSync(routesFile, 'utf8')); } catch { return null; }
+  if (!Array.isArray(routes)) return null;
+  const route = routes.find(r => r?.hostname === `${name}.${tld}`);
+  if (!route || !route.pid || route.pid === process.pid || !processIsAlive(route.pid)) return null;
+  return route;
+}
+
+// SIGTERM the previous portless for this name and wait until it has exited.
+// portless kills its own dev-server process group and drops its route before
+// exiting. If it stalls, refuse replacement: SIGKILL skips that cleanup,
+// and the detached dev server's process group is NOT the portless owner's PID.
+async function retirePortlessOwner(route, { graceMs = 5000 } = {}) {
+  const { pid } = route;
+  try { process.kill(pid, 'SIGTERM'); } catch (err) { if (err.code === 'ESRCH') return true; throw err; }
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    if (!processIsAlive(pid)) return true;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return !processIsAlive(pid);
+}
+
 async function cmdServe(argv) {
   let name = null;
   let local = false;
+  let replace = true;
   for (;;) {
     if (argv[0] === '--name') { name = argv[1] || null; argv = argv.slice(2); continue; }
     if (argv[0] === '--local') { local = true; argv = argv.slice(1); continue; }
+    if (argv[0] === '--keep') { replace = false; argv = argv.slice(1); continue; }
+    if (argv[0] === '--force' || argv[0] === '--replace') { replace = true; argv = argv.slice(1); continue; }
     break;
   }
   if (!argv.length) {
-    console.error('Usage: plans serve [--name <appName>] [--local] <command> [args…]');
+    console.error('Usage: plans serve [--name <appName>] [--local] [--keep] <command> [args…]');
     console.error('Example: plans serve bun web/pipeline-server.ts');
+    console.error('Re-running replaces a previous instance of the same app name; --keep refuses instead.');
     process.exit(1);
   }
   const cfg = await ensureConfig();
@@ -2106,10 +2572,28 @@ async function cmdServe(argv) {
     env.PORT = env.PORT || '0';
   } else {
     console.log(`[plans serve] ${name} -> https://${name}.localhost`);
+    const previous = portlessLiveRoute(name);
+    if (previous) {
+      if (!replace) {
+        console.error(`[plans serve] ${name} is already served by PID ${previous.pid} (--keep). Stop it or drop --keep to replace it.`);
+        process.exit(1);
+      }
+      console.log(`[plans serve] replacing the previous ${name} instance (PID ${previous.pid})`);
+      const gone = await retirePortlessOwner(previous);
+      if (!gone) {
+        console.error(`[plans serve] PID ${previous.pid} would not exit; refusing to start a second ${name}.`);
+        process.exit(1);
+      }
+    }
     // v19: when the hub's remote provider is Tailscale, share this app on the
     // tailnet too (portless: `tailscale serve` per app on its own https port).
-    // `--local` or PLANS_SERVE_LOCAL=1 keeps it LAN-only.
-    if (!local && !env.PLANS_SERVE_LOCAL) {
+    // `--local` or PLANS_SERVE_LOCAL=1 keeps it LAN-only: then the two flags
+    // that would share it beyond this network are taken out of what the app
+    // gets, also when the shell that ran this command had them set.
+    if (local || env.PLANS_SERVE_LOCAL) {
+      delete env.PORTLESS_FUNNEL;
+      delete env.PORTLESS_TAILSCALE;
+    } else {
       const info = await remoteInfo({ refresh: false }).catch(() => null);
       if (info?.enabled && (info.provider === 'tailscale' || info.provider === 'funnel')) {
         env[info.provider === 'funnel' ? 'PORTLESS_FUNNEL' : 'PORTLESS_TAILSCALE'] = '1';
@@ -2121,6 +2605,12 @@ async function cmdServe(argv) {
   const child = spawn(bin, args, { stdio: 'inherit', env });
   child.on('exit', code => process.exit(code ?? 0));
   child.on('error', err => { console.error(err.message); process.exit(1); });
+  // Forward termination to portless so `kill <wrapper pid>` (or a terminal
+  // closing) also stops the dev server instead of orphaning it. Ctrl-C already
+  // reaches portless through the terminal's process group.
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { try { child.kill(sig); } catch {} });
+  }
 }
 
 /* ---------------- index dashboard ---------------- */
@@ -2158,7 +2648,7 @@ function indexCss(cfg) {
   return `${fonts}
 :root{color-scheme:dark;${tokens}
   --ease-out:cubic-bezier(.16,1,.3,1);--d-fast:120ms;--d-state:200ms}
-@media(prefers-color-scheme:light){:root${mono ? '.never' : ''}{color-scheme:light;
+@media(prefers-color-scheme:light){:root{color-scheme:light;
   --bg:#f8f7f4;--surface-1:#f4f3ef;--surface-2:#efede8;--surface-3:#e7e4dd;
   --hairline:#e4e1db;--hairline-strong:#d5d2ca;--ink:#15171c;--ink-muted:#4b4f59;--ink-faint:#5e636d;
   --accent:color-mix(in oklab,${cfg.accent} 62%,black);--accent-ink:#fff;--focus:oklch(.5 .12 245)}}
@@ -2182,7 +2672,7 @@ input.search{width:100%;background:var(--surface-1);border:1px solid var(--hairl
   border-radius:var(--r);color:var(--ink);font-family:var(--font-ui);font-size:.9375rem;
   min-height:44px;padding:0 14px;margin-bottom:20px;transition:border-color var(--d-fast)}
 input.search::placeholder{color:var(--ink-faint)}
-input.search:hover{border-color:var(--hairline-strong)}
+@media(hover:hover) and (pointer:fine){input.search:hover{border-color:var(--hairline-strong)}}
 input.search:focus-visible{border-color:var(--accent);outline-offset:0;outline-color:transparent;box-shadow:0 0 0 3px color-mix(in oklch,var(--accent),transparent 80%)}
 h2{font-family:var(--font-mono);font-size:.75rem;font-weight:600;letter-spacing:.1em;
   text-transform:uppercase;color:var(--ink-muted);margin:32px 0 10px;display:flex;align-items:baseline;gap:8px}
@@ -2192,7 +2682,7 @@ a.row{display:flex;align-items:center;gap:12px;background:var(--surface-1);
   border:1px solid var(--hairline);border-radius:var(--r);padding:12px 16px;margin-bottom:8px;
   color:inherit;text-decoration:none;min-height:56px;
   transition:border-color var(--d-fast),background var(--d-fast),transform var(--d-fast) var(--ease-out)}
-a.row:hover{border-color:var(--hairline-strong);background:var(--surface-2);transform:translateX(2px)}
+@media(hover:hover) and (pointer:fine){a.row:hover{border-color:var(--hairline-strong);background:var(--surface-2)}}
 a.row:active{transform:none}
 a.row.hidden{display:none}
 .seq{font-family:var(--font-mono);font-size:.75rem;font-weight:700;flex:none;
@@ -2204,7 +2694,7 @@ a.row.latest .seq{background:var(--accent);border-color:var(--accent);color:var(
 .rt .f{font-family:var(--font-mono);font-size:.75rem;color:var(--ink-faint);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .when{font-family:var(--font-mono);font-size:.75rem;color:var(--ink-faint);flex:none}
-.pill{font-family:var(--font-mono);font-size:10px;font-weight:700;letter-spacing:.05em;
+.pill{font-family:var(--font-mono);font-size:.75rem;font-weight:700;letter-spacing:.05em;
   flex:none;background:var(--accent);color:var(--accent-ink);padding:2px 8px;
   border-radius:${mono ? '4px' : '999px'};text-transform:uppercase}
 .empty{color:var(--ink-muted);padding:40px 24px;border:1px dashed var(--hairline-strong);
@@ -2213,7 +2703,14 @@ a.row.latest .seq{background:var(--accent);border-color:var(--accent);color:var(
 .empty code{font-family:var(--font-mono);font-size:.875rem;background:var(--surface-2);padding:2px 7px;border-radius:5px}
 .none{color:var(--ink-faint);font-size:.875rem;padding:8px 0 0}
 @media(max-width:560px){.rt .t{white-space:normal;line-height:1.35}.when{display:none}.wrap{padding-top:28px}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important}}`;
+/* v37 native browse surface */
+:root{--ease-out:cubic-bezier(.23,1,.32,1);--r:16px}
+.wrap{max-width:900px;padding: max(36px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(48px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+.search{min-height:48px!important;border-radius:14px!important;font-size:16px!important}
+a.row{border-radius:16px;padding:16px;min-height:72px;gap:14px}.seq{border-radius:10px!important;min-width:44px;min-height:44px;display:grid;place-items:center}.rt .t{font-weight:650;line-height:1.35}.rt{min-width:0}.rt .f{overflow-wrap:anywhere}.pill{border-radius:8px!important}
+@media(hover:none){a.row:hover{transform:none}}a.row:active{transform:scale(.985)}
+@media(max-width:560px){body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{padding-top:max(24px,env(safe-area-inset-top))}h1{font-size:30px;letter-spacing:-.035em}.rt .f{display:none}.pill{padding:4px 6px}.sub{line-height:1.6}a.row{padding:14px;gap:10px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}a.row:active{transform:none}}`;
 }
 
 async function cmdIndex(argv) {
@@ -2247,7 +2744,7 @@ async function writeIndex(argv) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Plans — ${escapeHtml(repo)}</title>
 <!-- Generated dashboard. Rebuilt by \`plans.mjs index\` (SessionStart hook + \`plans new\`). Do not edit. -->
 <style>${indexCss(cfg)}
@@ -2331,9 +2828,11 @@ Usage:
   bun run plans <substr>        # open first plan/app whose name or title matches
   bun run plans new <slug> [--title "T"] [--source "session/prompt provenance"]
                                 # stamp a new interactive plan page (auto-numbered, repo accent)
-  bun run plans app <slug> [--title "T"] [--badge "TAG"] [--dest dir] [--recipe workspace|records]
+  bun run plans app <slug> [--title "T"] [--badge "TAG"] [--dest dir] [--recipe workspace|records|review|qa-review|changes]
                                 # stamp a single-file skeleton app via appkit (provenance +
                                 # upgradeable). --template <name> = legacy variant copy.
+  bun run plans mobile-test --url URL --out DIR [--device UDID] [--flow FILE]
+                                # physical iPhone Safari checks through the shared AppKit harness
   bun run plans index [--quiet] # regenerate docs/plans/index.html dashboard
   bun run plans serve [--name x] <cmd…>
                                 # run a dev/app server through portless -> https://<appName>.localhost
@@ -2368,6 +2867,13 @@ async function main() {
   if (arg === 'help' || arg === '-h' || arg === '--help') return cmdHelp();
   if (arg === 'new') return cmdNew(process.argv.slice(3));
   if (arg === 'app') return cmdApp(process.argv.slice(3));
+  if (arg === 'mobile-test') {
+    const kit = path.join(process.env.APPKIT_HOME || path.join(os.homedir(), '.claude', 'templates', 'appkit'), 'bin', 'appkit.mjs');
+    if (!existsSync(kit)) throw new Error('AppKit mobile harness is missing: ' + kit);
+    const result = spawnSync(process.execPath, [kit, 'mobile-test', ...process.argv.slice(3)], {stdio:'inherit'});
+    if (result.error) throw result.error;
+    process.exitCode = result.status ?? 1; return;
+  }
   if (arg === 'index') return cmdIndex(process.argv.slice(3));
   if (arg === 'serve') return cmdServe(process.argv.slice(3));
   if (arg === 'wait') return cmdWait(process.argv.slice(3));
@@ -2391,7 +2897,7 @@ async function main() {
     const q = arg.toLowerCase();
     const match =
       q === 'latest'
-        ? items.reduce((newest, item) => item.mtime > newest.mtime ? item : newest)
+        ? latestItem(items)
         : items.find(p => p.name.toLowerCase().includes(q) || p.title.toLowerCase().includes(q));
     if (!match) {
       console.error(`No plan or app matches "${arg}". Available:`);
